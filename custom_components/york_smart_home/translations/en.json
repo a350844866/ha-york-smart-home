@@ -1,0 +1,494 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "York Smart Home",
+        "description": "Log in with your York Smart Home (约克智慧家) app account.",
+        "menu_options": {
+          "password": "Phone number and password",
+          "sms": "SMS verification code"
+        }
+      },
+      "reauth": {
+        "title": "Log in again",
+        "description": "The saved session expired and could not be renewed automatically.",
+        "menu_options": {
+          "password": "Phone number and password",
+          "sms": "SMS verification code"
+        }
+      },
+      "password": {
+        "title": "Phone number and password",
+        "data": {
+          "phone": "Phone number",
+          "password": "Password"
+        },
+        "data_description": {
+          "password": "Recommended: the session is renewed automatically with the password."
+        }
+      },
+      "sms": {
+        "title": "SMS verification code",
+        "description": "A verification code will be sent to this phone.",
+        "data": {
+          "phone": "Phone number"
+        }
+      },
+      "sms_code": {
+        "title": "SMS verification code",
+        "description": "Enter the code sent to {phone}.",
+        "data": {
+          "verify_code": "Verification code"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Wrong phone number, password or verification code.",
+      "cannot_connect": "Cannot connect to the York cloud.",
+      "invalid_phone": "Enter an 11-digit mainland China mobile number.",
+      "unknown": "Unexpected error, see the log.",
+      "login_rejected": "The York cloud rejected the login: {message}",
+      "client_outdated": "The York cloud requires a newer app version; see the integration's documentation."
+    },
+    "abort": {
+      "already_configured": "This account is already configured.",
+      "reauth_successful": "Logged in again successfully.",
+      "wrong_account": "That login belongs to a different account."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "scan_interval": "Polling interval (seconds)",
+          "reclaim_session": "Always take the session back",
+          "session_yield_minutes": "Leave the session to the other device for (minutes)"
+        },
+        "data_description": {
+          "reclaim_session": "The York account allows one login at a time. Off (recommended): when the app logs in on a phone, Home Assistant stops polling for a while instead of logging the phone out. On: log in again right away (the phone is logged out).",
+          "session_yield_minutes": "How long Home Assistant waits before logging in again after another device took the session. A command sent from Home Assistant takes it back immediately."
+        }
+      }
+    }
+  },
+  "entity": {
+    "climate": {
+      "york": {
+        "state_attributes": {
+          "fan_mode": {
+            "state": {
+              "silent": "Breeze",
+              "super_low": "Super low",
+              "low": "Low",
+              "medium": "Medium",
+              "high": "High",
+              "super_high": "Super high",
+              "auto": "Auto"
+            }
+          },
+          "preset_mode": {
+            "state": {
+              "fresh_air_eco": "Fresh air eco",
+              "cool": "Cool",
+              "heat": "Heat",
+              "fan_only": "Fan",
+              "dry": "Dry",
+              "auto": "Auto",
+              "dry_comfort": "Comfort dry",
+              "dry_strong": "Strong dry",
+              "dry_auto": "Auto dry",
+              "floor_heat": "Floor heating",
+              "dry_floor_heat": "Dry + floor heating",
+              "fan_floor_heat": "Fan + floor heating",
+              "heat_floor_heat": "Heat + floor heating",
+              "purify": "Purify",
+              "heat_supply": "Heat supply"
+            }
+          },
+          "mode_locked": {
+            "name": "Mode locked"
+          },
+          "temperature_locked": {
+            "name": "Temperature locked"
+          },
+          "fan_locked": {
+            "name": "Fan speed locked"
+          },
+          "swing_mode": {
+            "state": {
+              "auto": "Auto (swing)",
+              "1": "Position 1",
+              "2": "Position 2",
+              "3": "Position 3",
+              "4": "Position 4",
+              "5": "Position 5",
+              "6": "Position 6",
+              "7": "Position 7",
+              "three_d": "3D air supply",
+              "far": "Far air supply"
+            }
+          }
+        }
+      }
+    },
+    "sensor": {
+      "indoor_temperature": {
+        "name": "Indoor temperature"
+      },
+      "running_state": {
+        "name": "Running state",
+        "state": {
+          "self_clean": "Self cleaning",
+          "sterilizing": "High-temperature sterilization",
+          "cooling_down": "System cooling down",
+          "ota": "Firmware update",
+          "comfortable": "Human sensing comfort",
+          "energy_saving": "Human sensing energy saving",
+          "idle": "Normal"
+        }
+      },
+      "fault_code": {
+        "name": "Fault code"
+      },
+      "timer_end": {
+        "name": "Timer end",
+        "state_attributes": {
+          "action": {
+            "name": "Action",
+            "state": {
+              "on": "Turn on",
+              "off": "Turn off"
+            }
+          }
+        }
+      },
+      "indoor_humidity": {
+        "name": "Indoor humidity"
+      },
+      "indoor_pm25": {
+        "name": "Indoor PM2.5"
+      },
+      "indoor_co2": {
+        "name": "Indoor CO₂"
+      },
+      "indoor_tvoc": {
+        "name": "Indoor TVOC"
+      }
+    },
+    "binary_sensor": {
+      "fault": {
+        "name": "Fault"
+      },
+      "filter": {
+        "name": "Filter cleaning reminder"
+      },
+      "defrost_display": {
+        "name": "Defrosting"
+      },
+      "pre_heat_display": {
+        "name": "Outdoor unit preheating"
+      },
+      "mode_conflict": {
+        "name": "Mode conflict"
+      },
+      "central_controller": {
+        "name": "Central control"
+      },
+      "auxiliary_heat_display": {
+        "name": "Auxiliary heating"
+      },
+      "mould_proof_status": {
+        "name": "Anti-mould operation"
+      },
+      "water_pump_status": {
+        "name": "Water pump running"
+      },
+      "freeze_protection": {
+        "name": "Freeze protection"
+      },
+      "micro_positive_pressure": {
+        "name": "Micro positive pressure"
+      },
+      "communication_exception": {
+        "name": "Human sensor communication error"
+      },
+      "antifrozen_status": {
+        "name": "Freeze protection"
+      }
+    },
+    "button": {
+      "filter_reset": {
+        "name": "Reset filter"
+      }
+    },
+    "switch": {
+      "key_lock": {
+        "name": "Key lock"
+      },
+      "key_sound": {
+        "name": "Key sound"
+      },
+      "auto_brightness": {
+        "name": "Auto brightness"
+      },
+      "save": {
+        "name": "Eco"
+      },
+      "sleep": {
+        "name": "Sleep"
+      },
+      "mute": {
+        "name": "Mute"
+      },
+      "health": {
+        "name": "Health"
+      },
+      "forest": {
+        "name": "Forest wind"
+      },
+      "aux_heat": {
+        "name": "Auxiliary heating"
+      },
+      "clean": {
+        "name": "Self-clean"
+      },
+      "strong": {
+        "name": "Strong"
+      },
+      "no_wind": {
+        "name": "Wind-free"
+      },
+      "leave": {
+        "name": "Leave home"
+      },
+      "sterilize": {
+        "name": "High-temperature sterilization"
+      },
+      "humidify": {
+        "name": "Humidification"
+      },
+      "smart_people": {
+        "name": "Smart human sensing"
+      },
+      "independent_human_sense": {
+        "name": "Human sensing"
+      }
+    },
+    "number": {
+      "backlight_brightness": {
+        "name": "Backlight brightness"
+      },
+      "indicator_light_brightness": {
+        "name": "Indicator light brightness"
+      }
+    },
+    "select": {
+      "simple_timer": {
+        "name": "Timer",
+        "state": {
+          "off": "Off",
+          "0_5h": "0.5 h",
+          "1h": "1.0 h",
+          "1_5h": "1.5 h",
+          "2h": "2.0 h",
+          "2_5h": "2.5 h",
+          "3h": "3.0 h",
+          "3_5h": "3.5 h",
+          "4h": "4.0 h",
+          "4_5h": "4.5 h",
+          "5h": "5.0 h",
+          "5_5h": "5.5 h",
+          "6h": "6.0 h",
+          "6_5h": "6.5 h",
+          "7h": "7.0 h",
+          "7_5h": "7.5 h",
+          "8h": "8.0 h",
+          "8_5h": "8.5 h",
+          "9h": "9.0 h",
+          "9_5h": "9.5 h",
+          "10h": "10.0 h",
+          "11h": "11.0 h",
+          "12h": "12.0 h",
+          "13h": "13.0 h",
+          "14h": "14.0 h",
+          "15h": "15.0 h",
+          "16h": "16.0 h",
+          "17h": "17.0 h",
+          "18h": "18.0 h",
+          "19h": "19.0 h",
+          "20h": "20.0 h",
+          "21h": "21.0 h",
+          "22h": "22.0 h",
+          "23h": "23.0 h",
+          "24h": "24.0 h"
+        },
+        "state_attributes": {
+          "action": {
+            "name": "Action",
+            "state": {
+              "on": "Turn on",
+              "off": "Turn off"
+            }
+          },
+          "next_action": {
+            "name": "Action of a new timer",
+            "state": {
+              "on": "Turn on",
+              "off": "Turn off"
+            }
+          }
+        }
+      },
+      "human_sensing": {
+        "name": "Human sensing",
+        "state": {
+          "off": "Off",
+          "blow": "Air to people",
+          "avoid": "Air avoids people",
+          "unmanned": "Energy saving when unoccupied"
+        }
+      },
+      "human_sense_action": {
+        "name": "Human sensing: when nobody is there",
+        "state": {
+          "keep_running": "Keep running",
+          "standby": "Standby",
+          "stop": "Stop"
+        }
+      },
+      "human_sense_nobody_time": {
+        "name": "Human sensing: nobody detected after",
+        "state": {
+          "30min": "30 min",
+          "60min": "60 min",
+          "90min": "90 min",
+          "120min": "120 min",
+          "180min": "180 min"
+        }
+      },
+      "air_deflector": {
+        "name": "Air deflector {number}",
+        "state": {
+          "auto": "Auto (swing)",
+          "1": "Position 1",
+          "2": "Position 2",
+          "3": "Position 3",
+          "4": "Position 4",
+          "5": "Position 5",
+          "6": "Position 6",
+          "7": "Position 7"
+        }
+      },
+      "horizontal_air": {
+        "name": "Left/right air",
+        "state": {
+          "auto": "Auto (swing)",
+          "1": "Position 1",
+          "2": "Position 2",
+          "3": "Position 3",
+          "4": "Position 4",
+          "5": "Position 5",
+          "6": "Position 6",
+          "7": "Position 7"
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "offline": {
+      "message": "The York wire controller is offline."
+    },
+    "ota_in_progress": {
+      "message": "The wire controller is being upgraded and cannot be controlled."
+    },
+    "cooling_down": {
+      "message": "The system is cooling down after self cleaning and cannot be controlled."
+    },
+    "mode_locked": {
+      "message": "The mode is locked on the wire controller."
+    },
+    "temperature_locked": {
+      "message": "The temperature is locked on the wire controller."
+    },
+    "fan_locked": {
+      "message": "The fan speed is locked on the wire controller."
+    },
+    "unsupported_hvac_mode": {
+      "message": "Unsupported HVAC mode: {mode}"
+    },
+    "unsupported_fan_mode": {
+      "message": "Unsupported fan mode: {mode}"
+    },
+    "unsupported_preset_mode": {
+      "message": "Unsupported preset: {mode}"
+    },
+    "temperature_not_supported": {
+      "message": "This mode has no temperature setpoint."
+    },
+    "auto_brightness_on": {
+      "message": "Auto brightness is on; turn it off before setting the brightness."
+    },
+    "unsupported_timer": {
+      "message": "Unsupported timer duration: {option}"
+    },
+    "auth_failed": {
+      "message": "The York Smart Home login is no longer valid; please log in again."
+    },
+    "session_taken": {
+      "message": "The York account was just logged in on another device again; the command was not sent."
+    },
+    "client_outdated": {
+      "message": "The York cloud requires a newer app version."
+    },
+    "command_rejected": {
+      "message": "The air conditioner rejected the command: {message}"
+    },
+    "cannot_connect": {
+      "message": "Could not reach the York cloud: {error}"
+    },
+    "function_not_supported": {
+      "message": "This wire controller does not offer the function {function}."
+    },
+    "function_not_available": {
+      "message": "The function {function} cannot be changed now: the app only allows it with the unit on or off and in certain modes."
+    },
+    "humidity_not_supported": {
+      "message": "There is no target humidity now (only in automatic dehumidification, dehumidification + floor heating, or while humidification is on)."
+    },
+    "unsupported_option": {
+      "message": "Unsupported option: {option}"
+    },
+    "swing_not_supported": {
+      "message": "This wire controller has no such air deflector."
+    },
+    "unsupported_swing_mode": {
+      "message": "Unsupported swing mode: {mode}"
+    },
+    "swing_not_available": {
+      "message": "The air deflectors can only be adjusted while the unit is on and not in floor heating."
+    }
+  },
+  "issues": {
+    "session_taken": {
+      "title": "York account in use on another device",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "York account in use on another device",
+            "description": "The York Smart Home account was logged in on another device (usually the app on a phone), which logged Home Assistant out. The account allows only one login at a time, so Home Assistant has stopped polling for {minutes} minutes instead of logging the other device out; its entities are unavailable meanwhile. It logs in again automatically afterwards.\n\nTo use both at the same time, register a second account, invite it from the app (家庭管理 → 邀请成员, QR code) and log in to Home Assistant with that account.\n\nSubmit below to log in again now; the other device will be logged out."
+          }
+        },
+        "error": {
+          "reclaim_failed": "Logging in again failed; see the log."
+        },
+        "abort": {
+          "not_loaded": "The integration is not loaded."
+        }
+      }
+    },
+    "client_outdated": {
+      "title": "York cloud requires a newer app version",
+      "description": "The York cloud rejected the requests with code 300 (app update required). Latest app version: {version}, download: {url}. Polling is paused for an hour and then tried again. Update the integration once a version with the new app version is available."
+    }
+  }
+}

@@ -1,0 +1,494 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "约克智慧家",
+        "description": "使用「约克智慧家」App 的账号登录。",
+        "menu_options": {
+          "password": "手机号 + 密码",
+          "sms": "短信验证码"
+        }
+      },
+      "reauth": {
+        "title": "重新登录",
+        "description": "保存的登录已失效，且无法自动续期，请重新登录。",
+        "menu_options": {
+          "password": "手机号 + 密码",
+          "sms": "短信验证码"
+        }
+      },
+      "password": {
+        "title": "手机号 + 密码",
+        "data": {
+          "phone": "手机号",
+          "password": "密码"
+        },
+        "data_description": {
+          "password": "推荐：登录失效时会自动用密码续期。"
+        }
+      },
+      "sms": {
+        "title": "短信验证码",
+        "description": "将向该手机号发送验证码。",
+        "data": {
+          "phone": "手机号"
+        }
+      },
+      "sms_code": {
+        "title": "短信验证码",
+        "description": "请输入发送到 {phone} 的验证码。",
+        "data": {
+          "verify_code": "验证码"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "手机号、密码或验证码错误。",
+      "cannot_connect": "无法连接约克云服务器。",
+      "invalid_phone": "请输入 11 位手机号。",
+      "unknown": "未知错误，请查看日志。",
+      "login_rejected": "约克云拒绝登录：{message}",
+      "client_outdated": "约克云要求更新 App 版本，请查看集成说明。"
+    },
+    "abort": {
+      "already_configured": "该账号已添加。",
+      "reauth_successful": "重新登录成功。",
+      "wrong_account": "登录的是另一个账号。"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "scan_interval": "轮询间隔（秒）",
+          "reclaim_session": "总是抢回登录",
+          "session_yield_minutes": "让出登录的时长（分钟）"
+        },
+        "data_description": {
+          "reclaim_session": "约克智慧家账号同时只能在一处登录。关闭（推荐）：手机 App 登录后，HA 暂停轮询一段时间，不把手机踢下线；打开：立即重新登录（手机会被踢下线）。",
+          "session_yield_minutes": "账号在其他设备登录后，HA 等待多久再重新登录。在 HA 里发送控制指令会立即重新登录。"
+        }
+      }
+    }
+  },
+  "entity": {
+    "climate": {
+      "york": {
+        "state_attributes": {
+          "fan_mode": {
+            "state": {
+              "silent": "微风",
+              "super_low": "超低风",
+              "low": "低风",
+              "medium": "中风",
+              "high": "高风",
+              "super_high": "超高风",
+              "auto": "自动"
+            }
+          },
+          "preset_mode": {
+            "state": {
+              "fresh_air_eco": "节能新风",
+              "cool": "制冷",
+              "heat": "制热",
+              "fan_only": "送风",
+              "dry": "除湿",
+              "auto": "自动",
+              "dry_comfort": "干爽除湿",
+              "dry_strong": "强力除湿",
+              "dry_auto": "自动除湿",
+              "floor_heat": "地暖",
+              "dry_floor_heat": "除湿+地暖",
+              "fan_floor_heat": "送风+地暖",
+              "heat_floor_heat": "制热+地暖",
+              "purify": "净化",
+              "heat_supply": "供热"
+            }
+          },
+          "mode_locked": {
+            "name": "模式已锁定"
+          },
+          "temperature_locked": {
+            "name": "温度已锁定"
+          },
+          "fan_locked": {
+            "name": "风量已锁定"
+          },
+          "swing_mode": {
+            "state": {
+              "auto": "自动（摆风）",
+              "1": "1 档",
+              "2": "2 档",
+              "3": "3 档",
+              "4": "4 档",
+              "5": "5 档",
+              "6": "6 档",
+              "7": "7 档",
+              "three_d": "3D出风",
+              "far": "超远风"
+            }
+          }
+        }
+      }
+    },
+    "sensor": {
+      "indoor_temperature": {
+        "name": "室内温度"
+      },
+      "running_state": {
+        "name": "运行状态",
+        "state": {
+          "self_clean": "自清洁中",
+          "sterilizing": "高温杀菌中",
+          "cooling_down": "系统冷却中",
+          "ota": "OTA升级中",
+          "comfortable": "人感舒适中",
+          "energy_saving": "人感节能中",
+          "idle": "正常"
+        }
+      },
+      "fault_code": {
+        "name": "故障代码"
+      },
+      "timer_end": {
+        "name": "定时结束",
+        "state_attributes": {
+          "action": {
+            "name": "动作",
+            "state": {
+              "on": "开机",
+              "off": "关机"
+            }
+          }
+        }
+      },
+      "indoor_humidity": {
+        "name": "室内湿度"
+      },
+      "indoor_pm25": {
+        "name": "室内PM2.5"
+      },
+      "indoor_co2": {
+        "name": "室内CO₂"
+      },
+      "indoor_tvoc": {
+        "name": "室内TVOC"
+      }
+    },
+    "binary_sensor": {
+      "fault": {
+        "name": "故障"
+      },
+      "filter": {
+        "name": "滤网清洗提醒"
+      },
+      "defrost_display": {
+        "name": "除霜中"
+      },
+      "pre_heat_display": {
+        "name": "外机预热中"
+      },
+      "mode_conflict": {
+        "name": "模式冲突"
+      },
+      "central_controller": {
+        "name": "集中控制"
+      },
+      "auxiliary_heat_display": {
+        "name": "辅热中"
+      },
+      "mould_proof_status": {
+        "name": "防霉运转"
+      },
+      "water_pump_status": {
+        "name": "水泵运行"
+      },
+      "freeze_protection": {
+        "name": "防冻结"
+      },
+      "micro_positive_pressure": {
+        "name": "微正压"
+      },
+      "communication_exception": {
+        "name": "人感通讯异常"
+      },
+      "antifrozen_status": {
+        "name": "防冻结"
+      }
+    },
+    "button": {
+      "filter_reset": {
+        "name": "滤网复位"
+      }
+    },
+    "switch": {
+      "key_lock": {
+        "name": "按键锁定"
+      },
+      "key_sound": {
+        "name": "按键音"
+      },
+      "auto_brightness": {
+        "name": "自动亮度"
+      },
+      "save": {
+        "name": "节能"
+      },
+      "sleep": {
+        "name": "睡眠"
+      },
+      "mute": {
+        "name": "静音"
+      },
+      "health": {
+        "name": "健康"
+      },
+      "forest": {
+        "name": "森林风"
+      },
+      "aux_heat": {
+        "name": "辅热"
+      },
+      "clean": {
+        "name": "自清洁"
+      },
+      "strong": {
+        "name": "强力"
+      },
+      "no_wind": {
+        "name": "无风感"
+      },
+      "leave": {
+        "name": "离家"
+      },
+      "sterilize": {
+        "name": "高温杀菌"
+      },
+      "humidify": {
+        "name": "加湿"
+      },
+      "smart_people": {
+        "name": "智慧人感"
+      },
+      "independent_human_sense": {
+        "name": "人感"
+      }
+    },
+    "number": {
+      "backlight_brightness": {
+        "name": "背光亮度"
+      },
+      "indicator_light_brightness": {
+        "name": "运行指示灯亮度"
+      }
+    },
+    "select": {
+      "simple_timer": {
+        "name": "定时",
+        "state": {
+          "off": "关闭定时",
+          "0_5h": "0.5 小时",
+          "1h": "1.0 小时",
+          "1_5h": "1.5 小时",
+          "2h": "2.0 小时",
+          "2_5h": "2.5 小时",
+          "3h": "3.0 小时",
+          "3_5h": "3.5 小时",
+          "4h": "4.0 小时",
+          "4_5h": "4.5 小时",
+          "5h": "5.0 小时",
+          "5_5h": "5.5 小时",
+          "6h": "6.0 小时",
+          "6_5h": "6.5 小时",
+          "7h": "7.0 小时",
+          "7_5h": "7.5 小时",
+          "8h": "8.0 小时",
+          "8_5h": "8.5 小时",
+          "9h": "9.0 小时",
+          "9_5h": "9.5 小时",
+          "10h": "10.0 小时",
+          "11h": "11.0 小时",
+          "12h": "12.0 小时",
+          "13h": "13.0 小时",
+          "14h": "14.0 小时",
+          "15h": "15.0 小时",
+          "16h": "16.0 小时",
+          "17h": "17.0 小时",
+          "18h": "18.0 小时",
+          "19h": "19.0 小时",
+          "20h": "20.0 小时",
+          "21h": "21.0 小时",
+          "22h": "22.0 小时",
+          "23h": "23.0 小时",
+          "24h": "24.0 小时"
+        },
+        "state_attributes": {
+          "action": {
+            "name": "动作",
+            "state": {
+              "on": "开机",
+              "off": "关机"
+            }
+          },
+          "next_action": {
+            "name": "新定时的动作",
+            "state": {
+              "on": "开机",
+              "off": "关机"
+            }
+          }
+        }
+      },
+      "human_sensing": {
+        "name": "人感",
+        "state": {
+          "off": "关闭",
+          "blow": "风吹人",
+          "avoid": "风避人",
+          "unmanned": "无人节能"
+        }
+      },
+      "human_sense_action": {
+        "name": "人感：无人时",
+        "state": {
+          "keep_running": "继续运行",
+          "standby": "待机",
+          "stop": "停机"
+        }
+      },
+      "human_sense_nobody_time": {
+        "name": "人感：无人判定时间",
+        "state": {
+          "30min": "30分钟",
+          "60min": "60分钟",
+          "90min": "90分钟",
+          "120min": "120分钟",
+          "180min": "180分钟"
+        }
+      },
+      "air_deflector": {
+        "name": "导风板{number}",
+        "state": {
+          "auto": "自动（摆风）",
+          "1": "1 档",
+          "2": "2 档",
+          "3": "3 档",
+          "4": "4 档",
+          "5": "5 档",
+          "6": "6 档",
+          "7": "7 档"
+        }
+      },
+      "horizontal_air": {
+        "name": "左右风",
+        "state": {
+          "auto": "自动（摆风）",
+          "1": "1 档",
+          "2": "2 档",
+          "3": "3 档",
+          "4": "4 档",
+          "5": "5 档",
+          "6": "6 档",
+          "7": "7 档"
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "offline": {
+      "message": "约克空调线控器当前离线。"
+    },
+    "ota_in_progress": {
+      "message": "线控器正在升级中，无法控制。"
+    },
+    "cooling_down": {
+      "message": "系统冷却中（自清洁结束后），暂时无法控制。"
+    },
+    "mode_locked": {
+      "message": "线控器已锁定模式，无法修改。"
+    },
+    "temperature_locked": {
+      "message": "线控器已锁定温度，无法修改。"
+    },
+    "fan_locked": {
+      "message": "线控器已锁定风量，无法修改。"
+    },
+    "unsupported_hvac_mode": {
+      "message": "不支持的模式：{mode}"
+    },
+    "unsupported_fan_mode": {
+      "message": "不支持的风速：{mode}"
+    },
+    "unsupported_preset_mode": {
+      "message": "不支持的预设模式：{mode}"
+    },
+    "temperature_not_supported": {
+      "message": "当前模式不能设定温度。"
+    },
+    "auto_brightness_on": {
+      "message": "自动亮度已开启，请先关闭自动亮度再调节亮度。"
+    },
+    "unsupported_timer": {
+      "message": "不支持的定时时长：{option}"
+    },
+    "auth_failed": {
+      "message": "约克智慧家登录失效，请重新登录。"
+    },
+    "session_taken": {
+      "message": "约克智慧家账号刚刚又在其他设备上登录，指令未发送。"
+    },
+    "client_outdated": {
+      "message": "约克云要求更新 App 版本。"
+    },
+    "command_rejected": {
+      "message": "空调控制失败：{message}"
+    },
+    "cannot_connect": {
+      "message": "无法连接约克云：{error}"
+    },
+    "function_not_supported": {
+      "message": "该线控器没有{function}功能。"
+    },
+    "function_not_available": {
+      "message": "现在不能切换{function}功能：App 只允许在特定的开关机状态和模式下切换。"
+    },
+    "humidity_not_supported": {
+      "message": "当前没有目标湿度（只有自动除湿、除湿+地暖模式，或加湿开启时才能设定）。"
+    },
+    "unsupported_option": {
+      "message": "不支持的选项：{option}"
+    },
+    "swing_not_supported": {
+      "message": "该线控器没有这个导风板。"
+    },
+    "unsupported_swing_mode": {
+      "message": "不支持的风向：{mode}"
+    },
+    "swing_not_available": {
+      "message": "只有开机且不在地暖模式时才能调节风向（导风板）。"
+    }
+  },
+  "issues": {
+    "session_taken": {
+      "title": "约克智慧家账号已在其他设备登录",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "约克智慧家账号已在其他设备登录",
+            "description": "约克智慧家账号在其他设备（通常是手机 App）上登录，HA 的登录被挤掉了。该账号同时只能在一处登录，为了不把对方踢下线，HA 暂停轮询 {minutes} 分钟，期间实体显示为「不可用」。到时会自动重新登录。\n\n想同时使用 App 和 HA：用另一个手机号注册第二个账号，在 App 的「家庭管理 → 邀请成员」生成二维码邀请它加入家庭，然后在 HA 里用第二个账号登录。\n\n想现在就用 HA：点击下方「提交」立即重新登录，另一台设备会被踢下线。"
+          }
+        },
+        "error": {
+          "reclaim_failed": "重新登录失败，请查看日志。"
+        },
+        "abort": {
+          "not_loaded": "集成未加载。"
+        }
+      }
+    },
+    "client_outdated": {
+      "title": "约克云要求更新 App 版本",
+      "description": "约克云以业务码 300（需要更新 App）拒绝了请求。最新 App 版本：{version}，下载地址：{url}。已暂停轮询 1 小时，之后会再试。请在有适配新版本的集成更新后升级。"
+    }
+  }
+}

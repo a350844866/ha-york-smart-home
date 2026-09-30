@@ -1,0 +1,12 @@
+{
+  "domain": "york_smart_home",
+  "name": "York Smart Home (约克智慧家)",
+  "codeowners": ["@mufeng05"],
+  "config_flow": true,
+  "documentation": "https://github.com/mufeng05/ha-york-smart-home",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/mufeng05/ha-york-smart-home/issues",
+  "requirements": [],
+  "version": "0.5.2"
+}

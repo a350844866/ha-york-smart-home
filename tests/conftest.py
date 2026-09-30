@@ -1,0 +1,95 @@
+"""Fixtures for York Smart Home tests."""
+
+from __future__ import annotations
+
+import copy
+import json
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+from custom_components.york_smart_home.api import Session
+from custom_components.york_smart_home.const import (
+    CONF_CLIENT_ID,
+    CONF_PHONE,
+    CONF_SESSION,
+    DOMAIN,
+)
+from homeassistant.const import CONF_PASSWORD
+
+FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "device.json").read_text("utf-8"))
+CODE = FIXTURE["device"]["xkqCode"]
+PHONE = "13800000000"
+
+
+@pytest.fixture(autouse=True)
+def auto_enable_custom_integrations(enable_custom_integrations):
+    yield
+
+
+@pytest.fixture(autouse=True)
+def no_delays():
+    with patch("custom_components.york_smart_home.coordinator.REFRESH_DELAY_AFTER_CONTROL", 0):
+        yield
+
+
+@pytest.fixture
+def mock_api():
+    """Patch YorkApi everywhere with a fake backed by the HAR capture."""
+    with (
+        patch("custom_components.york_smart_home.YorkApi", autospec=True) as cls,
+        patch("custom_components.york_smart_home.config_flow.YorkApi", new=cls),
+    ):
+
+        def construct(session, phone, **kwargs):
+            api.client_id = kwargs.get("client_id") or "cid"
+            api.ctor_kwargs = kwargs
+            return api
+
+        api = cls.return_value
+        cls.side_effect = construct
+        api.auth = Session(token="tok", user_id=200002, refresh_token="rt")
+
+        async def login(*args, **kwargs):
+            return api.auth
+
+        api.login_password = AsyncMock(side_effect=login)
+        api.relogin = AsyncMock(side_effect=login)
+        api.login_sms = AsyncMock(side_effect=login)
+        api.request_sms_code = AsyncMock()
+        api.get_wire_controllers = AsyncMock(return_value=[copy.deepcopy(FIXTURE["device"])])
+        api.get_wire_controller_detail = AsyncMock(
+            side_effect=lambda home, code: copy.deepcopy(FIXTURE["device"]["constantJson"])
+        )
+        api.get_status = AsyncMock(
+            side_effect=lambda home, codes: {CODE: copy.deepcopy(FIXTURE["status"])}
+        )
+        api.get_online = AsyncMock(return_value={CODE: True})
+        api.control = AsyncMock(return_value=None)
+        api.set_simple_timer = AsyncMock(return_value={})
+        api.cancel_simple_timer = AsyncMock(return_value={})
+        api.unsupported_count = 0
+        api.reclaim_session = False
+        yield api
+
+
+@pytest.fixture
+def config_entry():
+    return MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="200002",
+        data={
+            CONF_PHONE: PHONE,
+            CONF_PASSWORD: "pw",
+            CONF_CLIENT_ID: "cid",
+            CONF_SESSION: {
+                "token": "tok",
+                "user_id": 200002,
+                "refresh_token": "rt",
+                "login_version": 0,
+            },
+        },
+    )
