@@ -293,8 +293,6 @@ RUNNING_STATES: Final = (
 ALARM_SLOTS: Final = range(1, 17)
 # system_no / addr_no of an unused slot.
 ALARM_UNUSED_SLOT: Final = 255
-# fault_code sensor state when no indoor unit reports an alarm.
-FAULT_CODE_NONE: Final = "none"
 
 # ---------------------------------------------------------------------------
 # Simple timer (简易定时): the control page's "定时" picker
@@ -318,6 +316,9 @@ TIMER_HOURS: Final = (
     *(float(h) for h in range(11, 25)),
 )
 TIMER_OFF: Final = "off"
+# The timer select's state for a pending timer of unknown duration (set
+# elsewhere, or no longer the one set from HA); listed only while it is.
+TIMER_RUNNING: Final = "running"
 
 # ---------------------------------------------------------------------------
 # Capabilities of other controllers (extra functions, humidity, air

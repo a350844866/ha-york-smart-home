@@ -152,12 +152,12 @@
           "idle": "正常"
         }
       },
-      "fault_code": {
-        "name": "故障代码"
-      },
       "timer_end": {
         "name": "定时结束",
         "state_attributes": {
+          "end_time": {
+            "name": "结束时间"
+          },
           "action": {
             "name": "动作",
             "state": {
@@ -182,7 +182,21 @@
     },
     "binary_sensor": {
       "fault": {
-        "name": "故障"
+        "name": "故障",
+        "state_attributes": {
+          "code": {
+            "name": "故障代码"
+          },
+          "description": {
+            "name": "故障说明"
+          },
+          "alarms": {
+            "name": "故障列表"
+          },
+          "raw_alarm": {
+            "name": "报警图标"
+          }
+        }
       },
       "filter": {
         "name": "滤网清洗提醒"
@@ -366,6 +380,7 @@
         "name": "定时",
         "state": {
           "off": "关闭定时",
+          "running": "定时中（时长未知）",
           "0_5h": "0.5 小时",
           "1h": "1.0 小时",
           "1_5h": "1.5 小时",
@@ -514,6 +529,9 @@
     },
     "unsupported_timer": {
       "message": "不支持的定时时长：{option}"
+    },
+    "timer_duration_unknown": {
+      "message": "定时时长未知，请选择具体时长或「关闭定时」。"
     },
     "auth_failed": {
       "message": "约克智慧家登录失效，请重新登录。"

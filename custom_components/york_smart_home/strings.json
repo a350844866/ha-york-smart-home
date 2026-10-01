@@ -152,12 +152,12 @@
           "idle": "Normal"
         }
       },
-      "fault_code": {
-        "name": "Fault code"
-      },
       "timer_end": {
         "name": "Timer end",
         "state_attributes": {
+          "end_time": {
+            "name": "End time"
+          },
           "action": {
             "name": "Action",
             "state": {
@@ -182,7 +182,21 @@
     },
     "binary_sensor": {
       "fault": {
-        "name": "Fault"
+        "name": "Fault",
+        "state_attributes": {
+          "code": {
+            "name": "Fault code"
+          },
+          "description": {
+            "name": "Description"
+          },
+          "alarms": {
+            "name": "Alarms"
+          },
+          "raw_alarm": {
+            "name": "Alarm icon"
+          }
+        }
       },
       "filter": {
         "name": "Filter cleaning reminder"
@@ -366,6 +380,7 @@
         "name": "Timer",
         "state": {
           "off": "Off",
+          "running": "Running (duration unknown)",
           "0_5h": "0.5 h",
           "1h": "1.0 h",
           "1_5h": "1.5 h",
@@ -514,6 +529,9 @@
     },
     "unsupported_timer": {
       "message": "Unsupported timer duration: {option}"
+    },
+    "timer_duration_unknown": {
+      "message": "The running timer's duration is unknown: choose a duration or Off."
     },
     "auth_failed": {
       "message": "The York Smart Home login is no longer valid; please log in again."

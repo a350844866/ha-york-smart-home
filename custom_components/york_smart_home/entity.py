@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from datetime import datetime
 from typing import Any
 
-from homeassistant.core import callback
+from homeassistant.core import CALLBACK_TYPE, callback
 from homeassistant.helpers.device_registry import (
     CONNECTION_NETWORK_MAC,
     DeviceEntryType,
@@ -13,7 +14,9 @@ from homeassistant.helpers.device_registry import (
 )
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .api import as_number
 from .const import DOMAIN, KEY_INDOOR_HUMIDITY
@@ -197,6 +200,68 @@ class YorkEntity(CoordinatorEntity[YorkCoordinator]):
     def available(self) -> bool:
         dev = self.device
         return super().available and dev.present and dev.online and bool(dev.status)
+
+
+class YorkClockEntity(YorkEntity):
+    """A controller entity whose state also changes with the clock alone.
+
+    The coordinator writes the states on every poll, but nothing polls
+    while polling is disabled in the entry's system options (the entity
+    stays available), and polls can be up to an hour apart. So the state is
+    also written at the next moment the clock alone changes it
+    (``_clock_change``): looked up again on every coordinator update and at
+    each such moment, cancelled when the entity is removed. While polls fail
+    (session left to the app, HTTP 429, app update demanded) the controller
+    entities become unavailable after a few polls; until then each failed
+    poll still writes the states.
+    """
+
+    _clock_unsub: CALLBACK_TYPE | None = None
+    _clock_when: datetime | None = None
+
+    def _clock_change(self, now: datetime) -> datetime | None:
+        """The next moment after ``now`` (local time) the clock alone changes the state.
+
+        None when nothing changes without a new status.
+        """
+        raise NotImplementedError
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(self._cancel_clock_write)
+        self._schedule_clock_write()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        self._schedule_clock_write()
+        super()._handle_coordinator_update()
+
+    @callback
+    def _schedule_clock_write(self) -> None:
+        now = dt_util.now()
+        when = self._clock_change(now)
+        if when is not None and when <= now:
+            when = None  # never a moment already past: it would come round again at once
+        if self._clock_unsub is not None and when == self._clock_when:
+            return
+        self._cancel_clock_write()
+        if when is not None:
+            self._clock_when = when
+            self._clock_unsub = async_track_point_in_utc_time(self.hass, self._clock_write, when)
+
+    @callback
+    def _clock_write(self, _now: datetime) -> None:
+        self._clock_unsub = None
+        self._clock_when = None
+        self._schedule_clock_write()
+        self.async_write_ha_state()
+
+    @callback
+    def _cancel_clock_write(self) -> None:
+        if self._clock_unsub is not None:
+            self._clock_unsub()
+            self._clock_unsub = None
+        self._clock_when = None
 
 
 def indoor_temperature(status: dict[str, Any]) -> int | None:

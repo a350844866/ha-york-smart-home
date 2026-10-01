@@ -11,24 +11,30 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfTemperature
+from homeassistant.const import PERCENTAGE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util import dt as dt_util
 
 from .const import (
-    FAULT_CODE_NONE,
     KEY_INDOOR_CO2,
     KEY_INDOOR_HUMIDITY,
     KEY_INDOOR_PM25,
     KEY_INDOOR_TVOC,
     RUNNING_STATES,
 )
-from .control import has_simple_timer, timer_end_ms, timer_turns_on
-from .coordinator import YorkConfigEntry
-from .entity import YorkEntity, async_add_device_entities, indoor_temperature
+from .control import (
+    has_simple_timer,
+    timer_end_text,
+    timer_end_time,
+    timer_pending,
+    timer_text_changes_at,
+    timer_turns_on,
+)
+from .coordinator import YorkConfigEntry, uses_chinese
+from .entity import YorkClockEntity, YorkEntity, async_add_device_entities, indoor_temperature
 from .profile import fresh_air
-from .status import air_reading, alarms, running_state
+from .status import air_reading, running_state
 
 try:  # HA 2026.x: the old concentration constants are deprecated there (removal 2027.8)
     from homeassistant.const import UnitOfDensity, UnitOfRatio
@@ -55,7 +61,6 @@ async def async_setup_entry(
         lambda coordinator, code: [
             YorkIndoorTemperature(coordinator, code),
             YorkRunningState(coordinator, code),
-            YorkFaultCode(coordinator, code),
         ],
     )
 
@@ -173,51 +178,39 @@ class YorkRunningState(YorkEntity, SensorEntity):
         return running_state(self.status)
 
 
-class YorkFaultCode(YorkEntity, SensorEntity):
-    """Code of the first active alarm ("none" without one), with its description."""
+class YorkTimerEnd(YorkClockEntity, SensorEntity):
+    """定时结束: when the simple timer ends and what it does then, as text.
 
-    _attr_translation_key = "fault_code"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, code: str) -> None:
-        super().__init__(coordinator, code, "fault_code")
-
-    @property
-    def native_value(self) -> str | None:
-        active = alarms(self.status)
-        if active is None:
-            return None
-        return active[0]["code"] if active else FAULT_CODE_NONE
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        active = alarms(self.status)
-        if not active:
-            return {}
-        return {key: value for key, value in active[0].items() if key != "code"}
-
-
-class YorkTimerEnd(YorkEntity, SensorEntity):
-    """定时结束: when the simple timer fires (timerSimpleTime).
-
-    Unknown without a timer, when the reported time is implausible, or once
-    it is over 10 minutes past (fired; see control.TIMER_FIRED_MS); the
-    attribute ``action`` is what it does then ("on" / "off", timerSimpleOnoff).
+    In Home Assistant's language and time zone (control.timer_end_text):
+    "12:22 关机" / "Off at 12:22", "明天 08:00 开机" / "On at 08:00 tomorrow",
+    "无定时" / "No timer" without a timer or once it has fired (over 10 minutes
+    past its end, control.TIMER_FIRED_MS), "已设定定时" / "Timer set" while
+    the end is not known. Attributes: ``end_time`` (ISO 8601, local time)
+    when the end is known, ``action`` ("on" / "off", timerSimpleOnoff) while
+    a timer is pending. A text, not a timestamp: it never reads "unknown".
     """
 
     _attr_translation_key = "timer_end"
-    _attr_device_class = SensorDeviceClass.TIMESTAMP
 
     def __init__(self, coordinator, code: str) -> None:
         super().__init__(coordinator, code, "timer_end")
 
     @property
-    def native_value(self) -> datetime | None:
-        end = timer_end_ms(self.status, dt_util.utcnow().timestamp() * 1000)
-        return None if end is None else dt_util.utc_from_timestamp(end / 1000)
+    def native_value(self) -> str:
+        return timer_end_text(self.status, dt_util.now(), uses_chinese(self.hass))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        if self.native_value is None:
+        status = self.status
+        now = dt_util.now()
+        if not timer_pending(status, now.timestamp() * 1000):
             return {}
-        return {"action": "on" if timer_turns_on(self.status) else "off"}
+        attrs: dict[str, Any] = {}
+        if (end := timer_end_time(status, now)) is not None:
+            attrs["end_time"] = end.isoformat(timespec="seconds")
+        attrs["action"] = "on" if timer_turns_on(status) else "off"
+        return attrs
+
+    def _clock_change(self, now: datetime) -> datetime | None:
+        # The day's name changes at midnight; the timer counts as fired.
+        return timer_text_changes_at(self.status, now)

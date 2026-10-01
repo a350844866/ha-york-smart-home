@@ -124,12 +124,8 @@ async def test_user_device_gets_no_new_entities(
     await _setup(hass, config_entry)
     assert _entities(hass, SWITCH_DOMAIN) == {"key_lock", "key_sound_switch", "auto_brightness"}
     assert _entities(hass, SELECT_DOMAIN) == {"simple_timer"}
-    assert _entities(hass, SENSOR_DOMAIN) == {
-        "indoor_temperature",
-        "running_state",
-        "fault_code",
-        "timer_end",
-    }
+    # (0.6.0 dropped the fault code sensor: an attribute of 故障 now.)
+    assert _entities(hass, SENSOR_DOMAIN) == {"indoor_temperature", "running_state", "timer_end"}
     state = hass.states.get(_entity(hass, CLIMATE_DOMAIN, None))
     assert "swing_modes" not in state.attributes
     assert state.attributes.get("current_humidity") is None

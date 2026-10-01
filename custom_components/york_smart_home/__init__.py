@@ -8,7 +8,11 @@ import logging
 
 from homeassistant.const import CONF_PASSWORD, Platform
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import config_validation as cv, issue_registry as ir
+from homeassistant.helpers import (
+    config_validation as cv,
+    entity_registry as er,
+    issue_registry as ir,
+)
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import Session, YorkApi, new_client_id
@@ -42,6 +46,8 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: YorkConfigEntry) -> bool:
+    _remove_fault_code_sensors(hass, entry)
+
     @callback
     def store_session(session: Session) -> None:
         """Persist renewed sessions so a restart does not need a new login."""
@@ -69,6 +75,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: YorkConfigEntry) -> bool
     # setup (not part of it).
     coordinator.async_start_firmware_checks()
     return True
+
+
+@callback
+def _remove_fault_code_sensors(hass: HomeAssistant, entry: YorkConfigEntry) -> None:
+    """Remove the entry's fault code sensors of 0.5.x from the entity registry.
+
+    Their code and description are attributes of the fault binary sensor
+    since 0.6.0. Every one of the entry, also of controllers not discovered
+    now; nothing else.
+    """
+    registry = er.async_get(hass)
+    for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if (
+            entity.domain == Platform.SENSOR
+            and entity.platform == DOMAIN
+            and entity.unique_id.endswith("_fault_code")
+        ):
+            _LOGGER.debug("Removing the old fault code sensor %s", entity.entity_id)
+            registry.async_remove(entity.entity_id)
 
 
 async def _async_entry_updated(hass: HomeAssistant, entry: YorkConfigEntry) -> None:

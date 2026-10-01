@@ -414,9 +414,9 @@ async def test_one_entity_per_controller(hass: HomeAssistant, mock_api, config_e
         if entry.platform == DOMAIN and entry.unique_id.startswith(CODE)
     ]
     assert [e.unique_id for e in controller if e.domain == UPDATE_DOMAIN] == [f"{CODE}_firmware"]
-    # The account's 18 enabled entities and this one (besides the status
-    # banners disabled by default).
-    assert len([e for e in controller if e.disabled_by is None]) == 19
+    # The account's 17 enabled entities and this one (besides the status
+    # banners disabled by default; 0.6.0 also dropped the fault code sensor).
+    assert len([e for e in controller if e.disabled_by is None]) == 18
     firmware = er.async_get(hass).async_get(_firmware_id(hass))
     assert firmware.disabled_by is None
 

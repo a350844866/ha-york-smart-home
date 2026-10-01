@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import copy
+import json
+from pathlib import Path
 
 import pytest
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.york_smart_home.api import YorkSessionTakenError
 from custom_components.york_smart_home.const import DOMAIN, RUNNING_STATES, STATUS_BANNERS
@@ -32,6 +35,7 @@ from homeassistant.components.climate import (
 )
 from homeassistant.components.sensor import SensorDeviceClass
 from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
+from homeassistant.config_entries import ConfigEntryDisabler
 from homeassistant.const import (
     ATTR_ENTITY_ID,
     SERVICE_TURN_OFF,
@@ -65,7 +69,8 @@ def _constants(mock_api, **overrides) -> None:
 
 async def _setup(hass: HomeAssistant, entry, *, enable: tuple[str, ...] = ()) -> None:
     """Set up; ``enable`` pre-registers disabled-by-default binary sensors as enabled."""
-    entry.add_to_hass(hass)
+    if hass.config_entries.async_get_entry(entry.entry_id) is None:
+        entry.add_to_hass(hass)
     ent_reg = er.async_get(hass)
     for key in enable:
         ent_reg.async_get_or_create("binary_sensor", DOMAIN, f"{CODE}_{key}", config_entry=entry)
@@ -343,14 +348,18 @@ async def test_running_state_sensor(hass: HomeAssistant, mock_api, config_entry)
     assert _state(hass, "sensor", "running_state").state == "sterilizing"
 
 
-async def test_fault_code_sensor(hass: HomeAssistant, mock_api, config_entry) -> None:
+async def test_fault_attributes(hass: HomeAssistant, mock_api, config_entry) -> None:
+    """The first alarm's code and description are attributes of 故障 (no fault code sensor)."""
     await _setup(hass, config_entry)
-    state = _state(hass, "sensor", "fault_code")
-    assert state.state == "none"
-    ent_reg = er.async_get(hass)
-    assert ent_reg.async_get(state.entity_id).entity_category is EntityCategory.DIAGNOSTIC
     fault = _state(hass, "binary_sensor", "fault")
+    assert fault.state == "off"
+    ent_reg = er.async_get(hass)
+    assert ent_reg.async_get(fault.entity_id).entity_category is EntityCategory.DIAGNOSTIC
     assert fault.attributes == {**fault.attributes, "alarms": [], "raw_alarm": False}
+    # No placeholders without an alarm.
+    assert "code" not in fault.attributes
+    assert "description" not in fault.attributes
+    assert _entity(hass, "sensor", "fault_code") is None
 
     _with_status(
         mock_api,
@@ -358,19 +367,55 @@ async def test_fault_code_sensor(hass: HomeAssistant, mock_api, config_entry) ->
             **FIXTURE["status"],
             "iu1_alarm_code": "96",
             "iu2_alarm_code": "3",  # unused slot: only the app's red icon
+            "iu3_alarm_code": "11",
+            "iu3_system_no": 1,
+            "iu3_addr_no": 2,
         },
     )
     await config_entry.runtime_data.async_refresh()
-    state = _state(hass, "sensor", "fault_code")
-    assert state.state == "60"
-    assert state.attributes["system_no"] == "00"
-    assert state.attributes["indoor_unit_no"] == "03"
-    assert state.attributes["description"] == describe_code("60")["description"]
-    assert state.attributes["reason_two"] == describe_code("60")["reason_two"]
     fault = _state(hass, "binary_sensor", "fault")
     assert fault.state == "on"
-    assert [a["code"] for a in fault.attributes["alarms"]] == ["60"]
+    assert fault.attributes["code"] == "60"
+    assert fault.attributes["description"] == describe_code("60")["description"]
+    # The rest of the first alarm, and every other one, is in the list.
+    assert fault.attributes["alarms"] == [
+        {"code": "60", "system_no": "00", "indoor_unit_no": "03", **describe_code("60")},
+        {"code": "0B", "system_no": "01", "indoor_unit_no": "02", **describe_code("0B")},
+    ]
+    assert "reason_two" not in fault.attributes
     assert fault.attributes["raw_alarm"] is True
+
+    # A code the app's table does not know: no description at all.
+    _with_status(mock_api, {**FIXTURE["status"], "iu1_alarm_code": "254"})
+    await config_entry.runtime_data.async_refresh()
+    fault = _state(hass, "binary_sensor", "fault")
+    assert fault.state == "on"
+    assert fault.attributes["code"] == "FE"
+    assert "description" not in fault.attributes
+    assert fault.attributes["alarms"] == [{"code": "FE", "system_no": "00", "indoor_unit_no": "03"}]
+
+    # Gone again: so are code and description.
+    _with_status(mock_api, FIXTURE["status"])
+    await config_entry.runtime_data.async_refresh()
+    fault = _state(hass, "binary_sensor", "fault")
+    assert fault.state == "off"
+    assert "code" not in fault.attributes and "description" not in fault.attributes
+
+
+@pytest.mark.parametrize(
+    ("path", "names"),
+    [
+        ("strings.json", ["Fault code", "Description", "Alarms", "Alarm icon"]),
+        ("translations/zh-Hans.json", ["故障代码", "故障说明", "故障列表", "报警图标"]),
+    ],
+)
+def test_fault_translations(path: str, names: list[str]) -> None:
+    base = Path(__file__).parent.parent / "custom_components" / DOMAIN
+    entity = json.loads((base / path).read_text("utf-8"))["entity"]
+    attributes = entity["binary_sensor"]["fault"]["state_attributes"]
+    assert list(attributes) == ["code", "description", "alarms", "raw_alarm"]
+    assert [attribute["name"] for attribute in attributes.values()] == names
+    assert "fault_code" not in entity["sensor"]
 
 
 async def test_raw_alarm_without_listed_alarm(hass: HomeAssistant, mock_api, config_entry) -> None:
@@ -379,18 +424,63 @@ async def test_raw_alarm_without_listed_alarm(hass: HomeAssistant, mock_api, con
     fault = _state(hass, "binary_sensor", "fault")
     assert fault.state == "off"
     assert fault.attributes["raw_alarm"] is True
-    assert _state(hass, "sensor", "fault_code").state == "none"
+    assert "code" not in fault.attributes
 
 
-async def test_fault_code_unknown_without_alarm_fields(
+async def test_fault_unknown_without_alarm_fields(
     hass: HomeAssistant, mock_api, config_entry
 ) -> None:
     status = {k: v for k, v in FIXTURE["status"].items() if "alarm_code" not in k}
     _with_status(mock_api, status)
     await _setup(hass, config_entry)
-    state = _state(hass, "sensor", "fault_code")
-    assert state.state == "unknown"
-    assert "description" not in state.attributes
+    fault = _state(hass, "binary_sensor", "fault")
+    assert fault.state == "unknown"
+    assert "code" not in fault.attributes
+    assert "description" not in fault.attributes
+    assert fault.attributes["alarms"] == []
+
+
+async def test_old_fault_code_sensors_removed(hass: HomeAssistant, mock_api, config_entry) -> None:
+    """0.5.x fault code sensors of this entry leave the registry; nothing else does."""
+    config_entry.add_to_hass(hass)
+    # Another account's entry (switched off, so it is not set up here).
+    other_entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="200003",
+        data=dict(config_entry.data),
+        disabled_by=ConfigEntryDisabler.USER,
+    )
+    other_entry.add_to_hass(hass)
+    ent_reg = er.async_get(hass)
+
+    def register(domain: str, platform: str, unique_id: str, entry) -> str:
+        return ent_reg.async_get_or_create(
+            domain, platform, unique_id, config_entry=entry
+        ).entity_id
+
+    removed = [
+        register("sensor", DOMAIN, f"{CODE}_fault_code", config_entry),
+        # A controller not discovered now (removed from the account, offline cloud).
+        register("sensor", DOMAIN, "0f1e2d3c4b5a6978_fault_code", config_entry),
+    ]
+    kept = [
+        register("sensor", DOMAIN, f"{CODE}_running_state", config_entry),
+        register("binary_sensor", DOMAIN, f"{CODE}_fault", config_entry),
+        # Same suffix, but another platform or domain, or another account's entry.
+        register("binary_sensor", DOMAIN, "0f1e2d3c4b5a6978_fault_code", config_entry),
+        register("sensor", "other_integration", f"{CODE}_fault_code", config_entry),
+        register("sensor", DOMAIN, "1a2b3c4d5e6f7081_fault_code", other_entry),
+    ]
+    await _setup(hass, config_entry)
+    for entity_id in removed:
+        assert ent_reg.async_get(entity_id) is None, entity_id
+        assert hass.states.get(entity_id) is None, entity_id
+    for entity_id in kept:
+        assert ent_reg.async_get(entity_id) is not None, entity_id
+    assert _entity(hass, "sensor", "fault_code") is None
+    assert _state(hass, "binary_sensor", "fault").state == "off"
+    assert _state(hass, "sensor", "running_state").state == "idle"
 
 
 def _actions(hass):

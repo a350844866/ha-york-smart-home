@@ -58,7 +58,12 @@ async def async_setup_entry(
 
 
 class YorkFault(YorkEntity, BinarySensorEntity):
-    """On when any indoor unit reports an alarm code."""
+    """On when any indoor unit reports an alarm code.
+
+    Attributes: ``code`` and ``description`` of the first active alarm
+    (only while there is one; no description for codes the app's table does
+    not know), ``alarms`` (all active alarms) and ``raw_alarm``.
+    """
 
     _attr_translation_key = "fault"
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
@@ -75,11 +80,17 @@ class YorkFault(YorkEntity, BinarySensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         status = self.status
-        return {
-            "alarms": alarms(status) or [],
-            # The app's red alarm icon, which also counts unused slots.
-            "raw_alarm": raw_alarm(status),
-        }
+        active = alarms(status) or []
+        attrs: dict[str, Any] = {}
+        if active:
+            first = active[0]
+            attrs["code"] = first["code"]
+            if "description" in first:
+                attrs["description"] = first["description"]
+        attrs["alarms"] = active
+        # The app's red alarm icon, which also counts unused slots.
+        attrs["raw_alarm"] = raw_alarm(status)
+        return attrs
 
 
 class YorkFilterReminder(YorkEntity, BinarySensorEntity):

@@ -152,6 +152,15 @@ def issue_id(entry: ConfigEntry, key: str) -> str:
     return f"{key}_{entry.entry_id}"
 
 
+def uses_chinese(hass: HomeAssistant) -> bool:
+    """Whether texts the integration builds itself are Chinese.
+
+    Home Assistant's language decides, as for the translations: Chinese for
+    zh*, else English.
+    """
+    return hass.config.language.lower().startswith("zh")
+
+
 @dataclass
 class YorkDevice:
     """A wire controller and its latest state."""
@@ -1024,8 +1033,7 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
         """
         placeholders = dict(err.placeholders)
         if (func := placeholders.get("function")) in FUNC_LABELS:
-            chinese = self.hass.config.language.lower().startswith("zh")
-            placeholders["function"] = FUNC_LABELS[func][0 if chinese else 1]
+            placeholders["function"] = FUNC_LABELS[func][0 if uses_chinese(self.hass) else 1]
         return ServiceValidationError(
             translation_domain=DOMAIN,
             translation_key=err.key,

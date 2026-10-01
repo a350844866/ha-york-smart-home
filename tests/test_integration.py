@@ -219,6 +219,9 @@ async def test_fault_and_negative_temperature(hass: HomeAssistant, mock_api, con
             "description": APP_ALARM_TEXTS["03"],
         }
     ]
+    # The first alarm's code and description, also on their own.
+    assert fault.attributes["code"] == "03"
+    assert fault.attributes["description"] == APP_ALARM_TEXTS["03"]
     assert fault.attributes["raw_alarm"] is True
     temp_id = ent_reg.async_get_entity_id("sensor", DOMAIN, f"{CODE}_indoor_temperature")
     assert hass.states.get(temp_id).state == "-5"

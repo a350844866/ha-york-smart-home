@@ -15,6 +15,7 @@ controller's constants (capabilities, locks, limits) laid over it.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 
 from . import deflectors
@@ -888,6 +889,105 @@ def timer_fired(status: dict[str, Any], now_ms: float) -> bool:
         return False
     end = as_number(status.get(KEY_TIMER_TIME))
     return end is not None and end < now_ms - TIMER_FIRED_MS
+
+
+def timer_pending(status: dict[str, Any], now_ms: float) -> bool:
+    """A timer is set and has not fired yet (timer_active and not timer_fired)."""
+    return timer_active(status) and not timer_fired(status, now_ms)
+
+
+def _moment(ms: float) -> datetime | None:
+    """Epoch milliseconds as an aware UTC datetime; None outside datetime's range."""
+    try:
+        return datetime.fromtimestamp(ms / 1000, UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _next_midnight(now: datetime) -> datetime | None:
+    """When the date in the time zone of ``now`` (aware) changes next, in UTC.
+
+    Tomorrow's 00:00; where the clocks go back across midnight, so that it
+    comes twice, the one still ahead.
+    """
+    midnight = datetime.combine(now.date() + timedelta(days=1), time(), tzinfo=now.tzinfo)
+    for candidate in (midnight, midnight.replace(fold=1)):
+        # In UTC: aware datetimes of the same time zone compare by wall time.
+        if (moment := candidate.astimezone(UTC)) > now:
+            return moment
+    return None
+
+
+def timer_end_time(status: dict[str, Any], now: datetime) -> datetime | None:
+    """The end timer_end_ms gives, in the time zone of ``now`` (aware); else None."""
+    end = timer_end_ms(status, now.timestamp() * 1000)
+    return None if end is None else datetime.fromtimestamp(end / 1000, now.tzinfo)
+
+
+# English month names of the timer text: fixed, not the locale's (strftime).
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def timer_end_text(status: dict[str, Any], now: datetime, chinese: bool) -> str:
+    """The 定时结束 text: when the timer ends and what it does then.
+
+    ``now`` is an aware datetime in the time zone to show the end in (Home
+    Assistant's); the day is named relative to its date. 24-hour HH:MM and
+    the action (timer_turns_on): "12:22 关机", "明天 08:00 开机", "昨天
+    23:58 关机" (an end up to TIMER_FIRED_MS past, across midnight), other
+    days "10月3日 00:30 关机" (only within the 25 h window); in English "Off at
+    12:22", "On at 08:00 tomorrow", "Off at 23:58 yesterday", "Off at 00:30
+    on Oct 3". "无定时" / "No timer" without a timer or once it has fired
+    (timer_fired); "已设定定时" / "Timer set" while the end is not known (none
+    reported yet, not a number or implausibly far ahead: timer_end_ms).
+    """
+    if not timer_pending(status, now.timestamp() * 1000):
+        return "无定时" if chinese else "No timer"
+    if (end := timer_end_time(status, now)) is None:
+        return "已设定定时" if chinese else "Timer set"
+    clock = f"{end.hour:02d}:{end.minute:02d}"
+    days = (end.date() - now.date()).days
+    turn_on = timer_turns_on(status)
+    if chinese:
+        day = {0: "", 1: "明天 ", -1: "昨天 "}.get(days, f"{end.month}月{end.day}日 ")
+        return f"{day}{clock} {'开机' if turn_on else '关机'}"
+    day = {0: "", 1: " tomorrow", -1: " yesterday"}.get(
+        days, f" on {_MONTHS[end.month - 1]} {end.day}"
+    )
+    return f"{'On' if turn_on else 'Off'} at {clock}{day}"
+
+
+def timer_fired_at(status: dict[str, Any], now: datetime) -> datetime | None:
+    """The moment (UTC) a pending timer starts counting as fired (timer_fired).
+
+    Just over TIMER_FIRED_MS after its end (timer_fired is strict). None
+    without a pending timer or while its end is not a number.
+    """
+    if not timer_pending(status, now.timestamp() * 1000):
+        return None
+    end = as_number(status.get(KEY_TIMER_TIME))
+    return None if end is None else _moment(end + TIMER_FIRED_MS + 1)
+
+
+def timer_text_changes_at(status: dict[str, Any], now: datetime) -> datetime | None:
+    """The next moment (UTC) the clock alone changes timer_end_text, or None.
+
+    While an end is shown: the next midnight in the time zone of ``now``
+    (the day's name) or the moment the timer counts as fired, whichever
+    comes first; while the end lies implausibly far ahead ("Timer set"):
+    the moment it comes within the 25 h window. None when only a new status
+    changes the text (no pending timer, or an end that is not a number).
+    """
+    now_ms = now.timestamp() * 1000
+    if not timer_pending(status, now_ms):
+        return None
+    end = as_number(status.get(KEY_TIMER_TIME))
+    if end is None:
+        return None
+    if end > now_ms + _TIMER_END_WINDOW_MS:
+        return _moment(end - _TIMER_END_WINDOW_MS)
+    moments = (_next_midnight(now), _moment(end + TIMER_FIRED_MS + 1))
+    return min((moment for moment in moments if moment is not None), default=None)
 
 
 def timer_set_state(hours: float, turn_on: bool, data: dict[str, Any]) -> dict[str, Any]:

@@ -1,9 +1,10 @@
 """Selects for York wire controllers.
 
 * 定时 (simple timer): the control page's picker: "关闭定时", then 0.5 .. 10 h
-  in half hours and 11 .. 24 h in whole hours. A timer always toggles the
-  power state the unit has when it is set (a running unit is switched off,
-  a stopped one on).
+  in half hours and 11 .. 24 h in whole hours, and "定时中（时长未知）" while
+  a timer of unknown duration is pending. A timer always toggles the power
+  state the unit has when it is set (a running unit is switched off, a
+  stopped one on).
 * 人感 (one-direction human sensing, or 风吹人 / 风避人 with the 3D sensor).
 * The independent (K3) human sensing's action and time when nobody is there.
 * 导风板 2..4 (air deflectors beyond the first, which is the climate entity's
@@ -12,6 +13,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from homeassistant.components.select import SelectEntity
@@ -31,6 +33,7 @@ from .const import (
     KEY_TIMER_TIME,
     ONE_DIRECTION_OPTIONS,
     TIMER_OFF,
+    TIMER_RUNNING,
 )
 from .control import (
     TIMER_OPTIONS,
@@ -42,11 +45,12 @@ from .control import (
     one_direction_value,
     timer_active,
     timer_fired,
+    timer_fired_at,
     timer_option,
     timer_turns_on,
 )
 from .coordinator import YorkConfigEntry
-from .entity import YorkEntity, async_add_device_entities
+from .entity import YorkClockEntity, YorkEntity, async_add_device_entities
 from .profile import func_offered
 
 PARALLEL_UPDATES = 0  # the coordinator serializes commands per controller
@@ -197,35 +201,47 @@ class YorkDeflector(YorkEntity, SelectEntity):
         await self.coordinator.async_request_change(self._code, direction=(self._number, option))
 
 
-class YorkSimpleTimer(YorkEntity, SelectEntity):
-    """定时: off, or the duration of the running timer.
+# The timer select's options: "running" only while it is the state, right
+# after "off" (HA lists the options and refuses to select one not listed).
+_TIMER_SELECT_OPTIONS = [TIMER_OFF, *TIMER_OPTIONS]
+_TIMER_SELECT_OPTIONS_RUNNING = [TIMER_OFF, TIMER_RUNNING, *TIMER_OPTIONS]
 
-    Selecting a duration sets a new timer (replacing a running one, as the
-    app's picker does); "off" cancels it.
+
+class YorkSimpleTimer(YorkClockEntity, SelectEntity):
+    """定时: off, the duration of the pending timer, or "running".
+
+    Selecting a duration sets a new timer (replacing a pending one, as the
+    app's picker does); "off" cancels it. "running" (定时中（时长未知）) is
+    the state of a pending timer whose duration is unknown and is only
+    listed while it is the state: selecting it then changes nothing.
     """
 
     _attr_translation_key = "simple_timer"
-    _attr_options = [TIMER_OFF, *TIMER_OPTIONS]
 
     def __init__(self, coordinator, code: str) -> None:
         super().__init__(coordinator, code, "simple_timer")
 
     @property
-    def current_option(self) -> str | None:
-        """Off without a timer; else its duration, if known.
+    def options(self) -> list[str]:
+        if self.current_option == TIMER_RUNNING:
+            return _TIMER_SELECT_OPTIONS_RUNNING
+        return _TIMER_SELECT_OPTIONS
+
+    @property
+    def current_option(self) -> str:
+        """Off without a pending timer; else its duration if known, else running.
 
         The status only has the end time (the reported simple_timer_time is
         never read by the app, and whether it holds the duration or counts
         down is unknown). The duration is the one set from HA, while the
         cloud still reports that timer (the same timerSimpleTime, or still
-        none while the answer had none); a timer set elsewhere, or one whose
-        end has passed, shows as unknown (the end is in the timer end sensor).
+        none while the answer had none); a timer set elsewhere is "running"
+        (the end is in the timer end sensor). A timer whose end is over 10
+        minutes past (fired, control.TIMER_FIRED_MS) is off.
         """
         status = self.status
-        if not timer_active(status):
+        if not timer_active(status) or self._fired:
             return TIMER_OFF
-        if self._fired:
-            return None
         if (choice := self.device.timer_choice) is not None:
             end, hours = choice
             reported = as_number(status.get(KEY_TIMER_TIME))
@@ -234,11 +250,11 @@ class YorkSimpleTimer(YorkEntity, SelectEntity):
             same = end is None if reported is None else end == int(reported)
             if same:
                 return timer_option(hours)
-        return None
+        return TIMER_RUNNING
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """action: what the running timer does; next_action: what a new one would do."""
+        """action: what the pending timer does; next_action: what a new one would do."""
         status = self.status
         attrs = {"next_action": "on" if new_timer_turns_on(status) else "off"}
         if timer_active(status) and not self._fired:
@@ -249,7 +265,21 @@ class YorkSimpleTimer(YorkEntity, SelectEntity):
     def _fired(self) -> bool:
         return timer_fired(self.status, dt_util.utcnow().timestamp() * 1000)
 
+    def _clock_change(self, now: datetime) -> datetime | None:
+        # A pending timer shows "off" once it counts as fired.
+        return timer_fired_at(self.status, now)
+
     async def async_select_option(self, option: str) -> None:
+        if option == TIMER_RUNNING:
+            # Nothing to set: the duration is unknown. Selected while it is
+            # the state (e.g. a scene restoring it) this changes nothing;
+            # otherwise (it was listed a moment ago) the user has to choose.
+            if self.current_option == TIMER_RUNNING:
+                return
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="timer_duration_unknown",
+            )
         if option == TIMER_OFF:
             hours = None
         elif (hours := TIMER_OPTIONS.get(option)) is None:
