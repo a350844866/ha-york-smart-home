@@ -136,6 +136,19 @@ _STATUS_KEYS = {
 _STATUS_PATTERNS = re.compile(
     r"iu\d+_(alarm_code|system_no|addr_no)|filter_life_tips\d|is_\w+_avalable"
 )
+# A controller's entry of the firmware answer (getOtas) and its offered
+# updates: flags, types and release notes. Never the xkqCode, the update's
+# otaId, nor the indoor unit ids of its ouIuList (only counted).
+_FIRMWARE_KEYS = ("otaFlg", "statusProgress")
+_OTA_KEYS = (
+    "otaType",
+    "otaDesc",
+    "confirmFlg",
+    "confirmTime",
+    "otaProcess",
+    "popupFlg",
+    "romVersionD",
+)
 # Capability, lock and limit flags of the controller constants.
 _CONSTANT_PATTERNS = re.compile(
     r"is_\w+_(avalable|available|forbidden)|\w+_fix|controller\w+Fix"
@@ -155,6 +168,24 @@ def _filter(values: dict[str, Any], patterns: re.Pattern[str]) -> dict[str, Any]
 
 def _entries(value: Any) -> list[dict[str, Any]]:
     return [entry for entry in value if isinstance(entry, dict)] if isinstance(value, list) else []
+
+
+def _firmware(entry: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A controller's entry of the last firmware answer (None: not read yet)."""
+    if entry is None:
+        return None
+    updates = []
+    for update in _entries(entry.get("otaList")):
+        allowed = {key: update[key] for key in _OTA_KEYS if key in update}
+        if isinstance(update.get("ouIuList"), list):
+            allowed["indoor_unit_count"] = len(update["ouIuList"])
+        updates.append(allowed)
+    return {
+        # Whether the answer had an entry for the controller at all.
+        "listed": bool(entry),
+        **{key: entry[key] for key in _FIRMWARE_KEYS if key in entry},
+        "otaList": updates,
+    }
 
 
 def _scene(scene: YorkScene) -> dict[str, Any]:
@@ -208,9 +239,12 @@ async def async_get_config_entry_diagnostics(
                 "info": {k: dev.info[k] for k in _INFO_KEYS if k in dev.info},
                 "status": _filter(dev.status, _STATUS_PATTERNS),
                 "constants": _filter(dev.constants, _CONSTANT_PATTERNS),
+                "firmware": _firmware(dev.firmware),
             }
             for index, dev in enumerate(coordinator.devices.values(), start=1)
         ],
+        # Whether the last firmware read (getOtas) failed.
+        "firmware_read_failed": coordinator.firmware_error is not None,
         # Cloud scenes per home (homes by index, no ids or names). Only
         # whether the last read failed: the error names the home in its URL.
         "scene_read_failed": coordinator.scene_error is not None,

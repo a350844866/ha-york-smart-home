@@ -18,13 +18,13 @@ import time
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HassJob, HomeAssistant, callback
 from homeassistant.exceptions import (
     ConfigEntryAuthFailed,
     HomeAssistantError,
     ServiceValidationError,
 )
-from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers import device_registry as dr, issue_registry as ir
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -66,6 +66,10 @@ from .const import (
     KEY_TIMESTAMP,
     MODES,
     ONLINE_INTERVAL,
+    OTA_FIRST_DELAY,
+    OTA_INTERVAL,
+    OTA_RECHECK_DELAY,
+    OTA_RETRY_INTERVAL,
     REFRESH_DELAY_AFTER_CONTROL,
     RELOGIN_BACKOFF_MAX,
     RELOGIN_BACKOFF_MIN,
@@ -90,6 +94,7 @@ from .control import (
     timer_end_ms,
     timer_set_state,
 )
+from .firmware import home_controllers, installed_version
 from .profile import Profile, profile_for
 from .scenes import (
     CLOSE,
@@ -175,6 +180,10 @@ class YorkDevice:
     # (monotonic): once per end, TIMER_CHECK_DELAY after it.
     timer_check_end: int | None = None
     timer_check_after: float | None = None
+    # The controller's entry in the last firmware answer (getOtas: otaFlg,
+    # otaList ...); {} when the answer listed none for it (nothing offered),
+    # None until its home was read.
+    firmware: dict[str, Any] | None = None
 
     @property
     def code(self) -> str:
@@ -316,7 +325,25 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
         # Error of the last failed scene list read, logged once as a warning.
         self._scene_read_error: str | None = None
         self._scene_locks: dict[int, asyncio.Lock] = {}
+        # Firmware information (getOtas), read on its own slow timer: the
+        # armed timer and its due time (loop time), whether a read is in
+        # progress, and the error of the last failed read (logged once as a
+        # warning).
+        self._unsub_firmware_timer: Callable[[], None] | None = None
+        # Like the polling timer, cancelled when Home Assistant stops.
+        self._firmware_job = HassJob(
+            self._firmware_timer_fired, f"{DOMAIN} firmware timer", cancel_on_shutdown=True
+        )
+        self._firmware_due: float | None = None
+        self._firmware_reading = False
+        self._firmware_read_error: str | None = None
+        # Read again soon once the read in progress is done.
+        self._firmware_again = False
+        # A controller finished installing an update: rediscover (installed
+        # versions, constants) after the next firmware read.
+        self._firmware_rediscover = False
         entry.async_on_unload(self._cancel_control_refresh)
+        entry.async_on_unload(self._cancel_firmware_timer)
 
     @property
     def session_yielded(self) -> bool:
@@ -330,6 +357,11 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
     def scene_error(self) -> str | None:
         """Why the last scene list read failed (None: it worked)."""
         return self._scene_read_error
+
+    @property
+    def firmware_error(self) -> str | None:
+        """Why the last firmware read failed (None: it worked, or none was tried)."""
+        return self._firmware_read_error
 
     # --------------------------------------------------------------- polling
 
@@ -417,7 +449,7 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
                             dev.recheck_after = None
                             if dev.timer_check_after is not None and now >= dev.timer_check_after:
                                 dev.timer_check_after = None
-                        _merge_status(dev, status)
+                        self._merge(dev, status)
             self._full_status = False
 
             if active and (self._last_online is None or now - self._last_online >= ONLINE_INTERVAL):
@@ -458,19 +490,30 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
 
     async def _discover(self) -> None:
         records = {r["xkqCode"]: r for r in await self.api.get_wire_controllers()}
+        # A new installed version (an update was installed) or a new
+        # controller: read the offered firmware updates again soon.
+        firmware_changed = False
         for code, dev in self.devices.items():
             dev.present = code in records
             if dev.present:
+                old = installed_version(dev.info)
                 dev.info = records[code]
+                if installed_version(dev.info) != old:
+                    _LOGGER.debug("York %s firmware is now %s", code, installed_version(dev.info))
+                    firmware_changed = True
+                    self._show_versions(dev)
         for code, record in records.items():
             if code not in self.devices:
                 _LOGGER.debug("Discovered wire controller %s", code)
                 self.devices[code] = YorkDevice(info=record)
+                firmware_changed = True
         for dev in self.devices.values():
             if dev.present:
                 dev.constants = await self._fetch_constants(dev)
         # Re-check connectivity right after (re)discovery.
         self._last_online = None
+        if firmware_changed:
+            self._firmware_soon()
 
     async def _fetch_constants(self, dev: YorkDevice) -> dict[str, Any]:
         """Constants from the controller detail, as the app's control page reads them.
@@ -485,6 +528,39 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
             _LOGGER.debug("York %s: detail unavailable (%s), using deviceList", dev.code, err)
             constants = {}
         return constants or parse_constants(dev.info.get("constantJson"))
+
+    @callback
+    def _show_versions(self, dev: YorkDevice) -> None:
+        """Show a controller's new firmware versions on its device as well.
+
+        The device takes them from the controller record when its entities
+        are set up (sw_version versionMcu, hw_version versionWifi); after an
+        update they would only change at the next restart.
+        """
+        registry = dr.async_get(self.hass)
+        # (async_get_device is deprecated in newer releases, and its
+        # replacement does not exist in 2025.3.)
+        for device in dr.async_entries_for_config_entry(registry, self.config_entry.entry_id):
+            if (DOMAIN, dev.code) in device.identifiers:
+                registry.async_update_device(
+                    device.id,
+                    sw_version=dev.info.get("versionMcu"),
+                    hw_version=dev.info.get("versionWifi"),
+                )
+
+    def _merge(self, dev: YorkDevice, status: dict[str, Any]) -> None:
+        """Merge a status report (_merge_status); notice a finished firmware update.
+
+        When a controller stops reporting otaFlg "1" (the app's "OTA升级中..."),
+        its offered updates are read again soon, and its installed versions
+        and constants after that read (rediscovery).
+        """
+        updating = dev.ota
+        _merge_status(dev, status)
+        if updating and not dev.ota:
+            _LOGGER.debug("York %s finished installing a firmware update", dev.code)
+            self._firmware_rediscover = True
+            self._firmware_soon()
 
     # ---------------------------------------------------------------- scenes
 
@@ -576,6 +652,145 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
                 translation_placeholders={"scene": scene.name},
             )
         return scene
+
+    # -------------------------------------------------------------- firmware
+
+    @callback
+    def async_start_firmware_checks(self) -> None:
+        """Start the firmware timer: a first read OTA_FIRST_DELAY after setup.
+
+        Then every OTA_INTERVAL. Apart from the status polling and from
+        setup: a read never delays or fails a poll, and no poll waits for it.
+        """
+        self._arm_firmware_timer(OTA_FIRST_DELAY)
+
+    @callback
+    def _arm_firmware_timer(self, delay: float) -> None:
+        self._cancel_firmware_timer()
+        self._firmware_due = self.hass.loop.time() + delay
+        self._unsub_firmware_timer = async_call_later(self.hass, delay, self._firmware_job)
+
+    @callback
+    def _cancel_firmware_timer(self) -> None:
+        if self._unsub_firmware_timer is not None:
+            self._unsub_firmware_timer()
+            self._unsub_firmware_timer = None
+        self._firmware_due = None
+
+    @callback
+    def _firmware_timer_fired(self, _now: datetime) -> None:
+        self._unsub_firmware_timer = None
+        self._firmware_due = None
+        # Cancelled when the entry unloads (after the timer is).
+        self.config_entry.async_create_background_task(
+            self.hass, self._firmware_read(), f"{DOMAIN} firmware check"
+        )
+
+    async def _firmware_read(self) -> None:
+        """One read on the firmware timer, then the timer for the next one.
+
+        A cancelled read (the entry unloads) arms nothing.
+        """
+        self._firmware_reading = True
+        try:
+            delay = await self._fetch_firmware()
+        except Exception:  # never let a bug stop the slow timer for good
+            _LOGGER.exception("Unexpected error reading the York firmware information")
+            delay = OTA_RETRY_INTERVAL
+        self._firmware_reading = False
+        if self._firmware_again:
+            self._firmware_again = False
+            delay = min(delay, OTA_RECHECK_DELAY)
+        self._arm_firmware_timer(delay)
+
+    @callback
+    def _firmware_soon(self) -> None:
+        """Read the firmware information OTA_RECHECK_DELAY from now (or sooner if due).
+
+        After a controller finished installing an update, its installed
+        version changed or a new controller appeared. Does nothing before
+        the timer is started: the first read comes shortly after setup.
+        """
+        if self._firmware_reading:
+            self._firmware_again = True
+        elif (
+            self._firmware_due is not None
+            and self._firmware_due > self.hass.loop.time() + OTA_RECHECK_DELAY
+        ):
+            self._arm_firmware_timer(OTA_RECHECK_DELAY)
+
+    async def _fetch_firmware(self) -> float:
+        """Read the offered firmware updates of every home; returns the delay to the next read.
+
+        One getOtas request for all homes with a supported controller (the
+        app asks for the home it shows). Put off by OTA_RETRY_INTERVAL,
+        without a request, while polling is on hold (the session is left to
+        another device, the cloud demands a newer app or asked to pause, or
+        the polls fail).
+
+        A controller installing an update (otaFlg "1" in its status) keeps
+        the entry read before, so HA goes on showing the update it offered
+        as being installed: what the cloud lists for it meanwhile is
+        unknown (every app page skips a controller unless the entry's
+        otaFlg is "0"). It is read again soon after the installation
+        (_merge). The other controllers take the answer as usual, so one
+        that stays in "OTA升级中" (or went offline in it) holds nobody back.
+
+        Errors keep what was read before and are retried OTA_RETRY_INTERVAL
+        later; they never touch the status polling, which handles errors of
+        the session (taken by another device, app update demanded, rate
+        limit) by itself when it meets them. A 403 is just a failed read
+        (YorkApi.get_otas).
+        """
+        present = [dev for dev in self.devices.values() if dev.present]
+        if not present:
+            _LOGGER.debug("York firmware check put off: no wire controller (yet)")
+            return OTA_RETRY_INTERVAL
+        if self._cloud_on_hold() or not self.last_update_success:
+            _LOGGER.debug("York firmware check put off: polling is on hold")
+            return OTA_RETRY_INTERVAL
+        home_ids = list(dict.fromkeys(dev.home_id for dev in present))
+        try:
+            homes = await self.api.get_otas(home_ids)
+        except (YorkAuthError, YorkClientOutdatedError, YorkRateLimitError) as err:
+            _LOGGER.debug("York firmware check not done (%s); left to the status polling", err)
+            return OTA_RETRY_INTERVAL
+        except YorkError as err:
+            reason = str(err) or type(err).__name__
+            if self._firmware_read_error is None:
+                _LOGGER.warning(
+                    "Could not read the York firmware information (%s); keeping the last one "
+                    "and trying again in %s minutes",
+                    reason,
+                    OTA_RETRY_INTERVAL // 60,
+                )
+            else:
+                _LOGGER.debug("York firmware information still unreadable: %s", reason)
+            self._firmware_read_error = reason
+            return OTA_RETRY_INTERVAL
+        if self._firmware_read_error is not None:
+            _LOGGER.info("York firmware information can be read again")
+            self._firmware_read_error = None
+        for home_id in home_ids:
+            entries = home_controllers(homes, home_id)
+            if entries is None:
+                # Malformed for this home: keep what was read before.
+                _LOGGER.debug("York firmware answer has an unusable entry for a home")
+                continue
+            for dev in present:
+                if dev.home_id != home_id:
+                    continue
+                if dev.ota:
+                    _LOGGER.debug("York %s is installing an update: entry kept", dev.code)
+                    continue
+                dev.firmware = entries.get(dev.code, {})
+        if self._firmware_rediscover:
+            # After an installed update: its versions (and maybe constants)
+            # changed; the next poll reads the controller records again.
+            self._firmware_rediscover = False
+            self._last_discovery = None
+        self.async_update_listeners()
+        return OTA_INTERVAL
 
     # ------------------------------------------------------- session / issues
 
@@ -894,7 +1109,7 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
                 translation_key="cannot_connect",
                 translation_placeholders={"error": "no status in the reply"},
             )
-        _merge_status(dev, status)
+        self._merge(dev, status)
         self.async_update_listeners()
         _check_controllable(dev)
 

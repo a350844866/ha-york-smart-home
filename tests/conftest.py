@@ -29,6 +29,15 @@ HOME_DETAIL = json.loads((Path(__file__).parent / "fixtures" / "scenes.json").re
 ]
 SCENES = HOME_DETAIL["smartList"]
 SCENE_FLAGS = {key: value for key, value in HOME_DETAIL.items() if key != "smartList"}
+# getOtas answers (data): the account's (no update offered) and one offering
+# a controller firmware update, shaped like the app's bundled sample.
+OTAS = json.loads((Path(__file__).parent / "fixtures" / "otas.json").read_text("utf-8"))
+
+
+def ota_homes(home_ids: list) -> list[dict]:
+    """The account's answer (data.homeList): its home entry for each requested home."""
+    home = OTAS["account"]["homeList"][0]
+    return [{**copy.deepcopy(home), "homeId": home_id} for home_id in home_ids]
 
 
 @pytest.fixture(autouse=True)
@@ -89,6 +98,7 @@ def mock_api():
         api.set_scene_open = AsyncMock(return_value={"updateTime": 1700000000009})
         api.run_recommended_scene = AsyncMock(return_value={"updateTime": 1700000000009})
         api.set_auto_scene = AsyncMock(return_value={"updateTime": 1700000000009})
+        api.get_otas = AsyncMock(side_effect=lambda home_ids: ota_homes(home_ids))
         api.unsupported_count = 0
         api.reclaim_session = False
         yield api

@@ -874,3 +874,29 @@ class YorkApi:
             raise YorkCommandError(message)
         data = answer.get("data")
         return dict(data) if isinstance(data, dict) else {}
+
+    # -------------------------------------------------------------- firmware
+
+    async def get_otas(self, home_ids: list[Any]) -> list[dict[str, Any]]:
+        """Firmware updates (OTA) offered for the controllers of ``home_ids``.
+
+        POST /api/appdevice/getOtas (OTAS_GETOTAS) with ``{"homeIdList":
+        [homeId, ...]}``, the body of the app's OtaService.requestOtas
+        (whose pages always send the one home they show). ``data.homeList``
+        holds one ``{homeId, xkqList, deviceList}`` per home; a wire
+        controller's entry is ``{xkqCode, otaFlg, statusProgress, otaList:
+        [{otaId, otaType, confirmFlg, otaDesc, confirmTime, otaProcess,
+        popupFlg}]}`` (the app's bundled sample assets/data/family-ota.json),
+        see firmware.py. Returns the home entries; anything but code "200"
+        with a homeList is an error (the app then shows nothing).
+
+        A background read like the scene list: optional (a 403 is
+        YorkApiError, never a login).
+        """
+        data = await self._authed(
+            "POST", "/api/appdevice/getOtas", json={"homeIdList": home_ids}, optional=True
+        )
+        homes = data.get("homeList") if isinstance(data, dict) else None
+        if not isinstance(homes, list):
+            raise YorkApiError("getOtas: invalid response")
+        return [home for home in homes if isinstance(home, dict)]

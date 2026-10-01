@@ -36,6 +36,7 @@ PLATFORMS: list[Platform] = [
     Platform.SWITCH,
     Platform.NUMBER,
     Platform.SELECT,
+    Platform.UPDATE,
 ]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
@@ -64,6 +65,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: YorkConfigEntry) -> bool
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
+    # Firmware information on its own slow timer, first read shortly after
+    # setup (not part of it).
+    coordinator.async_start_firmware_checks()
     return True
 
 

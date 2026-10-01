@@ -469,3 +469,21 @@ SCENE_FLAG_KEYS: Final = (
 SCENE_RESULT_INTERVAL: Final = 2
 SCENE_RESULT_TIMEOUT: Final = 20
 SCENE_RESULT_POLLS: Final = SCENE_RESULT_TIMEOUT // SCENE_RESULT_INTERVAL
+
+# ---------------------------------------------------------------------------
+# Batch 6b: firmware update information (OTA, see firmware.py).
+# ---------------------------------------------------------------------------
+
+# The app asks getOtas each time its home page, a controller's settings page
+# or the OTA page opens. Updates are rare and installed from the app, so HA
+# reads it on its own slow timer, never in the 2 s status loop: this often,
+OTA_INTERVAL: Final = 6 * 3600
+# the first time this long after setup (not part of it),
+OTA_FIRST_DELAY: Final = 60
+# again this long after a failed read, or one put off because polling is on
+# hold (session left to another device, app update demanded, rate limit,
+# failing polls) or there is no wire controller yet,
+OTA_RETRY_INTERVAL: Final = 30 * 60
+# and this long after a controller finished installing an update, its
+# installed version changed or a new controller appeared.
+OTA_RECHECK_DELAY: Final = 60

@@ -471,6 +471,11 @@
           "7": "7 档"
         }
       }
+    },
+    "update": {
+      "firmware": {
+        "name": "固件"
+      }
     }
   },
   "exceptions": {

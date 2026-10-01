@@ -1,0 +1,38 @@
+{
+  "_note": "getOtas answers (POST /api/appdevice/getOtas {homeIdList} -> data) with fake ids. account: the account's answer, no update offered (its home with empty lists). offered: shaped like the app's bundled sample assets/data/family-ota.json (one controller firmware update with popupFlg 1), with a fake otaId and release notes.",
+  "account": {
+    "homeList": [
+      {
+        "homeId": 100001,
+        "xkqList": [],
+        "deviceList": []
+      }
+    ]
+  },
+  "offered": {
+    "homeList": [
+      {
+        "homeId": 100001,
+        "xkqList": [
+          {
+            "xkqCode": "0a1b2c3d4e5f6071",
+            "otaFlg": "0",
+            "statusProgress": null,
+            "otaList": [
+              {
+                "otaId": 400004,
+                "otaType": "1",
+                "confirmFlg": "0",
+                "otaDesc": "1. 优化显示\n2. 修复已知问题",
+                "confirmTime": null,
+                "otaProcess": "1",
+                "popupFlg": "1"
+              }
+            ]
+          }
+        ],
+        "deviceList": []
+      }
+    ]
+  }
+}
