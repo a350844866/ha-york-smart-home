@@ -6,13 +6,17 @@ app bundle (es2015 chunks):
 * Check: OtaService.requestOtas (a copy in chunks 11, 56, 57, 61, 70 and 71;
   main's httpUrl OTAS_GETOTAS "/api/appdevice/getOtas") posts
   ``{"homeIdList": [homeId]}``: the home page (chunk 11) when a home with
-  devices loads, the controller settings pages (56 xkq-color-set, 57
-  xkq-set) and the OTA page (61) when they open, always for the one home
-  they show. ``data.homeList[]`` is ``{homeId, xkqList, deviceList}``, a
-  wire controller's entry ``{xkqCode, otaFlg, statusProgress, otaList}``
-  and an update ``{otaId, otaType, confirmFlg, otaDesc, confirmTime,
-  otaProcess, popupFlg}`` (the bundled sample assets/data/family-ota.json:
-  otaId a number, the flags and types strings, confirmTime null).
+  devices loads (unless localStorage updateOtaFlag is set, see Install),
+  the controller settings pages (56 xkq-color-set, 57 xkq-set) and the
+  OTA page (61) when they open, always for the one home they show; the
+  home page picks it from the answer by ``homeId == currentHomeId``, the
+  other pages take ``homeList[0]``. How the cloud answers a request for
+  several homes is unknown. ``data.homeList[]`` is ``{homeId, xkqList,
+  deviceList}``, a wire controller's entry ``{xkqCode, otaFlg,
+  statusProgress, otaList}`` and an update ``{otaId, otaType, confirmFlg,
+  otaDesc, confirmTime, otaProcess, popupFlg}`` (the bundled sample
+  assets/data/family-ota.json: otaId a number, the flags and types
+  strings, confirmTime and statusProgress null).
 * Offered: every page skips a controller unless its otaFlg is the string
   "0" (``"0"===n.otaFlg``); a controller installing an update reports
   otaFlg "1" in its status, for which the home page shows "OTA升级中..." and
@@ -34,17 +38,29 @@ app bundle (es2015 chunks):
   unclear and it is not used here. An update's dialog ("版本升级") shows
   the otaDesc of the first entry of its type (release notes, lines
   separated by newlines).
-* Never read by the app: confirmFlg, statusProgress. otaProcess and
-  confirmTime are only copied into the install request.
+* Never read by the app: confirmFlg, statusProgress (its shape is unknown:
+  null in the sample). otaProcess and confirmTime are only copied into
+  the install request.
 * Install (not done by Home Assistant: updates are installed from the
-  app): "立刻更新" first checks xkqOnlineStatus ("线控器（…）升级失败，请保持
-  设备在线" when offline), then posts /api/appdevice/homes/{homeId}/otaCtrl
-  (OTAS_OTACTRL) ``{homeId, ctrlFlg: "1", xkqList: [{xkqCode, otaList:
-  [{otaId, confirmTime, otaProcess}]}], deviceList: []}`` with the entries
-  of the chosen otaType ("一键更新" sends the full entries of every
-  controller); code "200" means accepted. Leaving the OTA page the home
-  page opened sends ctrlFlg "0" (declines the popup). The progress request
-  (OTAS_OTAPROGRESS, /api/appstatus/otaProgress) is never called.
+  app; chunk 61): each way first checks that the controllers are online
+  (xkqOnlineStatus; "线控器（…）升级失败，请保持设备在线" when one is not),
+  then posts /api/appdevice/homes/{homeId}/otaCtrl (OTAS_OTACTRL)
+  ``{homeId, ctrlFlg: "1", xkqList: [{xkqCode, otaList}], deviceList:
+  []}``; code "200" means accepted. A row's update icon opens a dialog
+  (版本升级: the otaDesc, 忽略 / 立刻更新) whose 立刻更新
+  (OtaInfoComponent.updateOta) sends the controller's updates of the
+  chosen otaType as ``{otaId, confirmTime, otaProcess}``. The page's
+  bottom button (allUpdate) sends the full getOtas entries of the
+  controllers it lists: labelled 一键更新 on the page the home page opens
+  (xkqCode "all": every controller with a popupFlg "1" update), 立刻更新
+  on the page a controller's settings page opens for that controller.
+  After an accepted request the app sets localStorage updateOtaFlag and
+  goes to the home page, which skips its check while the flag is set
+  (cleared when the user opens a control page, runs a scene, opens the
+  home management or comes back to the home tab). Leaving the OTA page
+  the home page opened sends ctrlFlg "0" with the full entries (declines
+  the popup). The progress request (OTAS_OTAPROGRESS,
+  /api/appstatus/otaProgress) is never called.
 """
 
 from __future__ import annotations
@@ -101,12 +117,19 @@ def installed_version(record: Mapping[str, Any]) -> str | None:
     return " / ".join(part for part in parts if part not in _UNKNOWN) or None
 
 
-def home_controllers(homes: Iterable[Any], home_id: Any) -> dict[str, dict[str, Any]] | None:
+def home_controllers(
+    homes: Iterable[Any], home_id: Any, *, only_home: bool = True
+) -> dict[str, dict[str, Any]] | None:
     """The controller entries of ``home_id`` in a getOtas answer, by xkqCode.
 
-    A home missing from the answer, or with a null xkqList, has nothing
-    offered: the app's pages then show nothing either. None when its
-    xkqList is not a list at all: its controllers keep what was read before.
+    A home with an empty or null xkqList has nothing offered (the
+    account's answer lists its home with an empty xkqList), and so has a
+    home missing from the answer to a request for it alone (``only_home``,
+    what the app sends): the home page then finds nothing for it either.
+    None, so that its controllers keep what was read before, when its
+    xkqList is not a list at all, or when the home is missing from the
+    answer to a request for several homes: the app never asks for more
+    than one, so a missing home may just not have been answered.
     """
     for home in homes:
         if not isinstance(home, Mapping) or not same_id(home.get("homeId"), home_id):
@@ -121,7 +144,7 @@ def home_controllers(homes: Iterable[Any], home_id: Any) -> dict[str, dict[str, 
             for entry in entries
             if isinstance(entry, Mapping) and entry.get("xkqCode")
         }
-    return {}
+    return {} if only_home else None
 
 
 def offered(entry: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:
@@ -158,6 +181,12 @@ def _grouped(updates: Iterable[Mapping[str, Any]]) -> list[tuple[str, list[Mappi
     return [(kind, groups[kind]) for kind in order]
 
 
+def _id_order(oid: str) -> tuple[int, float, str]:
+    """Sort key of otaIds: numbers by value (400007 before 400010), then texts."""
+    number = as_number(oid)
+    return (0, number, oid) if number is not None else (1, 0.0, oid)
+
+
 def latest_version(installed: str | None, updates: Sequence[Mapping[str, Any]]) -> str | None:
     """The installed version while nothing is offered, else the offered updates.
 
@@ -166,14 +195,17 @@ def latest_version(installed: str | None, updates: Sequence[Mapping[str, Any]]) 
     and otaId, e.g. "MCU OTA 400004" or "MCU OTA 400004, Wi-Fi OTA 400005"
     (two updates of one type: "MCU OTA 400004+400007"). Never an
     installed version, so Home Assistant shows the update; the same as long
-    as the same updates are offered (a skipped update stays skipped), and
-    another one when a different update is offered.
+    as the same updates are offered, in whatever order the answer lists
+    them (types in a fixed order, the ids of a type sorted), so a skipped
+    update stays skipped; another one when a different update is offered.
     """
     if not updates:
         return installed
     names = []
     for kind, group in _grouped(updates):
-        ids = list(dict.fromkeys(oid for update in group if (oid := _text(update.get("otaId")))))
+        ids = sorted(
+            {oid for update in group if (oid := _text(update.get("otaId")))}, key=_id_order
+        )
         name = f"{_label(kind)} OTA"
         names.append(f"{name} {'+'.join(ids)}" if ids else name)
     return ", ".join(names)

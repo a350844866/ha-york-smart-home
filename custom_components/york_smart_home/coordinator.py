@@ -491,8 +491,10 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
     async def _discover(self) -> None:
         records = {r["xkqCode"]: r for r in await self.api.get_wire_controllers()}
         # A new installed version (an update was installed) or a new
-        # controller: read the offered firmware updates again soon.
-        firmware_changed = False
+        # controller: read the offered firmware updates again soon. Armed
+        # right away: the next discovery sees no change any more, so an
+        # error further down (e.g. a 429 reading the constants) must not
+        # lose it.
         for code, dev in self.devices.items():
             dev.present = code in records
             if dev.present:
@@ -500,20 +502,18 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
                 dev.info = records[code]
                 if installed_version(dev.info) != old:
                     _LOGGER.debug("York %s firmware is now %s", code, installed_version(dev.info))
-                    firmware_changed = True
                     self._show_versions(dev)
+                    self._firmware_soon()
         for code, record in records.items():
             if code not in self.devices:
                 _LOGGER.debug("Discovered wire controller %s", code)
                 self.devices[code] = YorkDevice(info=record)
-                firmware_changed = True
+                self._firmware_soon()
         for dev in self.devices.values():
             if dev.present:
                 dev.constants = await self._fetch_constants(dev)
         # Re-check connectivity right after (re)discovery.
         self._last_online = None
-        if firmware_changed:
-            self._firmware_soon()
 
     async def _fetch_constants(self, dev: YorkDevice) -> dict[str, Any]:
         """Constants from the controller detail, as the app's control page reads them.
@@ -723,8 +723,10 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
         """Read the offered firmware updates of every home; returns the delay to the next read.
 
         One getOtas request for all homes with a supported controller (the
-        app asks for the home it shows). Put off by OTA_RETRY_INTERVAL,
-        without a request, while polling is on hold (the session is left to
+        app asks for the home it shows); a home missing from an answer for
+        several homes keeps what was read before (home_controllers). Put
+        off by OTA_RETRY_INTERVAL, without a request, while there is no
+        controller yet or polling is on hold (the session is left to
         another device, the cloud demands a newer app or asked to pause, or
         the polls fail).
 
@@ -772,10 +774,11 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
             _LOGGER.info("York firmware information can be read again")
             self._firmware_read_error = None
         for home_id in home_ids:
-            entries = home_controllers(homes, home_id)
+            entries = home_controllers(homes, home_id, only_home=len(home_ids) == 1)
             if entries is None:
-                # Malformed for this home: keep what was read before.
-                _LOGGER.debug("York firmware answer has an unusable entry for a home")
+                # Malformed or not answered for this home: keep what was
+                # read before.
+                _LOGGER.debug("York firmware answer has nothing usable for a home; kept the last")
                 continue
             for dev in present:
                 if dev.home_id != home_id:

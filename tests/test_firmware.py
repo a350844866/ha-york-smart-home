@@ -7,6 +7,7 @@ import copy
 from datetime import timedelta
 import json
 import logging
+from unittest.mock import PropertyMock, patch
 
 import pytest
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
@@ -24,7 +25,9 @@ from custom_components.york_smart_home.api import (
 )
 from custom_components.york_smart_home.const import (
     API_BASE,
+    CLIENT_OUTDATED_PAUSE,
     DOMAIN,
+    FAILURES_BEFORE_UNAVAILABLE,
     OTA_FIRST_DELAY,
     OTA_INTERVAL,
     OTA_RECHECK_DELAY,
@@ -45,6 +48,7 @@ from homeassistant.components.update import (
     DOMAIN as UPDATE_DOMAIN,
     SERVICE_INSTALL,
     SERVICE_SKIP,
+    UpdateEntity,
     UpdateEntityFeature,
 )
 from homeassistant.const import ATTR_ENTITY_ID, EntityCategory
@@ -56,7 +60,7 @@ from homeassistant.util import dt as dt_util
 from .conftest import CODE, FIXTURE, OTAS, ota_homes
 from .test_api import OK, UNAUTHORIZED, _api, _login_body, _resp
 from .test_integration import _setup
-from .test_session import _issue, _later, _reauth_started, _yield
+from .test_session import _issue, _later, _reauth_started, _set_options, _yield
 
 HOME = 100001
 HOME2 = 100002
@@ -208,6 +212,26 @@ def test_latest_version() -> None:
     assert latest_version("MCU", [{"otaType": "1"}]) != "MCU"
 
 
+def test_latest_version_any_order() -> None:
+    """The same updates in another order (or as strings) give the same name.
+
+    Home Assistant clears a skipped version once the latest version
+    differs, so a reordered answer must not show a skipped update again.
+    """
+    updates = [
+        {**MCU_UPDATE, "otaId": 400007},
+        WIFI_UPDATE,
+        {**MCU_UPDATE, "otaId": "400004"},
+        {**MCU_UPDATE, "otaId": 99},
+        {**MCU_UPDATE, "otaId": "beta"},
+        MCU_UPDATE,
+    ]
+    name = "MCU OTA 99+400004+400007+beta, Wi-Fi OTA 400005"  # ids by value, then texts
+    assert latest_version(INSTALLED, updates) == name
+    assert latest_version(INSTALLED, list(reversed(updates))) == name
+    assert latest_version(INSTALLED, updates[2:] + updates[:2]) == name
+
+
 def test_release_summary() -> None:
     assert release_summary([]) is None
     assert release_summary(offered(None)) is None
@@ -250,6 +274,12 @@ def test_home_controllers() -> None:
     assert home_controllers([{"homeId": HOME, "xkqList": junk}], HOME) == {}
     assert home_controllers([{"homeId": HOME, "xkqList": "bad"}], HOME) is None
     assert home_controllers([{"homeId": HOME, "xkqList": {CODE: entry}}], HOME) is None
+    # Asked for together with other homes (the app never does), a home the
+    # answer leaves out may just not have been answered: unknown.
+    assert home_controllers(homes, HOME, only_home=False) == {CODE: entry}
+    assert home_controllers(homes, HOME2, only_home=False) == {}
+    assert home_controllers([], HOME, only_home=False) is None
+    assert home_controllers(homes, 100003, only_home=False) is None
 
 
 # ================================================================= request
@@ -413,6 +443,58 @@ async def test_update_offered(hass: HomeAssistant, mock_api, config_entry) -> No
     assert state.attributes["latest_version"] == INSTALLED
 
 
+async def test_skip_kept_in_any_order(hass: HomeAssistant, mock_api, config_entry) -> None:
+    """A skipped update stays skipped when the answer lists it in another order."""
+    second = {**MCU_UPDATE, "otaId": 400007}
+    _serve(mock_api, _entry(second, MCU_UPDATE))
+    await _setup(hass, config_entry)
+    await _first_read(hass)
+    entity_id = _firmware_id(hass)
+    assert hass.states.get(entity_id).attributes["latest_version"] == "MCU OTA 400004+400007"
+    await hass.services.async_call(
+        UPDATE_DOMAIN, SERVICE_SKIP, {ATTR_ENTITY_ID: entity_id}, blocking=True
+    )
+    _serve(mock_api, _entry(MCU_UPDATE, second))
+    await _fire(hass, OTA_INTERVAL + 1)
+    assert mock_api.get_otas.await_count == 2
+    state = hass.states.get(entity_id)
+    assert state.state == "off"
+    assert state.attributes["latest_version"] == "MCU OTA 400004+400007"
+    assert state.attributes["skipped_version"] == "MCU OTA 400004+400007"
+
+
+@pytest.mark.parametrize(
+    ("default", "expected"),
+    [
+        # Newer releases: Home Assistant's own path, serving brand/icon.png.
+        (
+            f"/api/brands/integration/{DOMAIN}/icon.png",
+            f"/api/brands/integration/{DOMAIN}/icon.png",
+        ),
+        # Older ones (2025.3): the brands CDN, which only has a placeholder.
+        (f"https://brands.home-assistant.io/_/{DOMAIN}/icon.png", None),
+        (None, None),
+    ],
+)
+async def test_entity_picture(
+    hass: HomeAssistant, mock_api, config_entry, default, expected
+) -> None:
+    """UpdateEntity's brand picture: kept where Home Assistant serves it, else none."""
+    with patch.object(
+        UpdateEntity, "entity_picture", new_callable=PropertyMock, return_value=default
+    ):
+        await _setup(hass, config_entry)
+        state = hass.states.get(_firmware_id(hass))
+    assert state.attributes.get("entity_picture") == expected
+
+
+async def test_entity_picture_of_this_release(hass: HomeAssistant, mock_api, config_entry) -> None:
+    """The running Home Assistant: its own brand path, or no picture at all."""
+    await _setup(hass, config_entry)
+    picture = hass.states.get(_firmware_id(hass)).attributes.get("entity_picture")
+    assert picture in (None, f"/api/brands/integration/{DOMAIN}/icon.png")
+
+
 async def test_several_updates_offered(hass: HomeAssistant, mock_api, config_entry) -> None:
     """MCU, Wi-Fi and indoor unit updates of one controller, any popupFlg."""
     _serve(mock_api, _entry(IU_UPDATE, WIFI_UPDATE, MCU_UPDATE))
@@ -552,6 +634,57 @@ async def test_installing_without_offer(hass: HomeAssistant, mock_api, config_en
     assert state.state == "off"
     assert state.attributes["in_progress"] is False
     assert state.attributes["latest_version"] == INSTALLED
+
+
+@pytest.mark.parametrize(
+    "listed",
+    [
+        # The account's answer: nothing listed for the controller.
+        [],
+        # Read while it already installed, before its status said so.
+        [_entry(MCU_UPDATE, ota_flg="1")],
+    ],
+)
+async def test_installing_unseen_update(
+    hass: HomeAssistant, mock_api, config_entry, listed
+) -> None:
+    """Installing an update the last read did not offer: unknown, not up to date.
+
+    E.g. the app's popup tapped between two reads. Which update is
+    installed is unknown, so the latest version is too (as before the
+    first read), while the entity shows the installation.
+    """
+    _serve(mock_api, *listed)
+    await _setup(hass, config_entry)
+    await _first_read(hass)
+    coordinator = config_entry.runtime_data
+    entity_id = _firmware_id(hass)
+    assert hass.states.get(entity_id).state == "off"
+
+    _reports(mock_api, _report(1, otaFlg="1"))
+    await coordinator.async_refresh()
+    state = hass.states.get(entity_id)
+    assert state.state == "unknown"
+    assert state.attributes["in_progress"] is True
+    assert state.attributes["installed_version"] == INSTALLED
+    assert state.attributes["latest_version"] is None
+    assert state.attributes["release_summary"] is None
+    # A read meanwhile changes nothing for it.
+    await _fire(hass, OTA_INTERVAL + 1)
+    assert mock_api.get_otas.await_count == 2
+    assert hass.states.get(entity_id).state == "unknown"
+
+    # Done: up to date at once, and read again soon.
+    _serve(mock_api)
+    _reports(mock_api, _report(2, otaFlg="0"))
+    await coordinator.async_refresh()
+    state = hass.states.get(entity_id)
+    assert state.state == "off"
+    assert state.attributes["in_progress"] is False
+    assert state.attributes["latest_version"] == INSTALLED
+    await _fire(hass, OTA_RECHECK_DELAY + 1)
+    assert mock_api.get_otas.await_count == 3
+    assert hass.states.get(entity_id).state == "off"
 
 
 async def test_read_while_installing(hass: HomeAssistant, mock_api, config_entry) -> None:
@@ -764,6 +897,49 @@ async def test_all_homes_in_one_request(hass: HomeAssistant, mock_api, config_en
     assert hass.states.get(_firmware_id(hass, CODE2)).state == "on"
 
 
+async def test_home_left_out_of_answer(hass: HomeAssistant, mock_api, config_entry) -> None:
+    """Several homes asked for, one left out of the answer: not taken as up to date.
+
+    The app never asks for more than one home, so whether the cloud answers
+    for all of them is unknown: a home the answer leaves out keeps what was
+    read before (unknown before the first read).
+    """
+    _second_controller(mock_api)
+    answered = [HOME]
+
+    def answer(home_ids):
+        assert home_ids == [HOME, HOME2]
+        homes = ota_homes([home_id for home_id in home_ids if home_id in answered])
+        for home in homes:
+            if home["homeId"] == HOME2:
+                home["xkqList"] = [_entry(MCU_UPDATE, code=CODE2)]
+        return homes
+
+    mock_api.get_otas.side_effect = answer
+    await _setup(hass, config_entry)
+    await _first_read(hass)
+    first, second = _firmware_id(hass), _firmware_id(hass, CODE2)
+    assert hass.states.get(first).state == "off"
+    assert hass.states.get(second).state == "unknown"
+    assert config_entry.runtime_data.devices[CODE2].firmware is None
+    assert config_entry.runtime_data.firmware_error is None
+
+    answered[:] = [HOME, HOME2]
+    await _fire(hass, OTA_INTERVAL + 1)
+    state = hass.states.get(second)
+    assert state.state == "on"
+    assert state.attributes["latest_version"] == "MCU OTA 400004"
+
+    # Left out again: the last offer is kept.
+    answered[:] = [HOME]
+    await _fire(hass, OTA_INTERVAL + 1)
+    assert mock_api.get_otas.await_count == 3
+    state = hass.states.get(second)
+    assert state.state == "on"
+    assert state.attributes["latest_version"] == "MCU OTA 400004"
+    assert hass.states.get(first).state == "off"
+
+
 async def test_new_controller_read_soon(hass: HomeAssistant, mock_api, config_entry) -> None:
     await _setup(hass, config_entry)
     await _first_read(hass)
@@ -777,6 +953,48 @@ async def test_new_controller_read_soon(hass: HomeAssistant, mock_api, config_en
     assert mock_api.get_otas.await_count == 2
     assert mock_api.get_otas.await_args.args == ([HOME, HOME2],)
     assert hass.states.get(_firmware_id(hass, CODE2)).state == "off"
+
+
+@pytest.mark.parametrize("change", ["new controller", "new version"])
+async def test_change_kept_when_discovery_fails(
+    hass: HomeAssistant, mock_api, config_entry, change
+) -> None:
+    """A change the discovery saw before failing still gets its read soon.
+
+    The next discovery sees no change any more (the controller is known,
+    its record updated), so the read must be armed as soon as it is seen.
+    """
+    await _setup(hass, config_entry)
+    await _first_read(hass)
+    coordinator = config_entry.runtime_data
+    if change == "new controller":
+        _second_controller(mock_api)
+    else:
+        mock_api.get_wire_controllers.return_value = [
+            {**copy.deepcopy(FIXTURE["device"]), "versionMcu": "C-01700"}
+        ]
+    detail = mock_api.get_wire_controller_detail.side_effect
+    mock_api.get_wire_controller_detail.side_effect = YorkRateLimitError(60)
+    coordinator._last_discovery = None
+    await coordinator.async_refresh()
+    assert coordinator._paused_until is not None  # the 429 stopped the discovery
+    assert coordinator._last_discovery is None
+    assert coordinator._firmware_due == pytest.approx(hass.loop.time() + OTA_RECHECK_DELAY, abs=5)
+
+    # The pause over, the discovery is done again (seeing no change).
+    mock_api.get_wire_controller_detail.side_effect = detail
+    with _later(61):
+        await coordinator.async_refresh()
+    assert coordinator._last_discovery is not None
+    await _fire(hass, OTA_RECHECK_DELAY + 1)
+    assert mock_api.get_otas.await_count == 2
+    if change == "new controller":
+        assert mock_api.get_otas.await_args.args == ([HOME, HOME2],)
+        assert hass.states.get(_firmware_id(hass, CODE2)).state == "off"
+    else:
+        state = hass.states.get(_firmware_id(hass))
+        assert state.attributes["installed_version"] == "C-01700 / W-00258"
+        assert state.state == "off"
 
 
 # ------------------------------------------------------------ slow timer
@@ -845,6 +1063,129 @@ async def test_read_does_not_hold_polling(hass: HomeAssistant, mock_api, config_
     assert hass.states.get(_firmware_id(hass)).state == "unknown"
     answered.set()
     await hass.async_block_till_done(wait_background_tasks=True)
+    assert hass.states.get(_firmware_id(hass)).state == "off"
+
+
+@pytest.mark.parametrize("trigger", ["installed", "new controller"])
+async def test_recheck_asked_during_read(
+    hass: HomeAssistant, mock_api, config_entry, trigger
+) -> None:
+    """A reason to read again soon while a read is under way: soon after it.
+
+    The answer under way may predate the change (e.g. still offer an
+    update installed meanwhile, and an indoor unit update changes no
+    version the discovery would see), so the next read comes
+    OTA_RECHECK_DELAY after it rather than OTA_INTERVAL.
+    """
+    answered = asyncio.Event()
+
+    async def slow(home_ids):
+        await answered.wait()
+        return ota_homes(home_ids)
+
+    mock_api.get_otas.side_effect = slow
+    await _setup(hass, config_entry)
+    coordinator = config_entry.runtime_data
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=OTA_FIRST_DELAY + 1))
+    await hass.async_block_till_done()
+    mock_api.get_otas.assert_awaited_once_with([HOME])
+    assert coordinator._firmware_reading
+
+    if trigger == "installed":
+        for seconds, flag in ((1, "1"), (2, "0")):
+            _reports(mock_api, _report(seconds, otaFlg=flag))
+            await coordinator.async_refresh()
+    else:
+        _second_controller(mock_api)
+        coordinator._last_discovery = None
+        await coordinator.async_refresh()
+    assert coordinator._firmware_due is None  # nothing armed during the read
+
+    answered.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert not coordinator._firmware_reading
+    assert coordinator._firmware_due == pytest.approx(hass.loop.time() + OTA_RECHECK_DELAY, abs=5)
+    await _fire(hass, OTA_RECHECK_DELAY - 10)
+    assert mock_api.get_otas.await_count == 1
+    await _fire(hass, OTA_RECHECK_DELAY + 1)
+    assert mock_api.get_otas.await_count == 2
+    if trigger == "new controller":
+        assert mock_api.get_otas.await_args.args == ([HOME, HOME2],)
+        assert hass.states.get(_firmware_id(hass, CODE2)).state == "off"
+    # Then the slow cadence again.
+    assert coordinator._firmware_due == pytest.approx(hass.loop.time() + OTA_INTERVAL, abs=5)
+
+
+async def test_recheck_never_postpones(hass: HomeAssistant, mock_api, config_entry) -> None:
+    """A read due sooner than OTA_RECHECK_DELAY is not put off by a new reason."""
+    await _setup(hass, config_entry)
+    await _first_read(hass)
+    coordinator = config_entry.runtime_data
+    coordinator._arm_firmware_timer(30)  # e.g. a retry, due in 30 s
+    due = coordinator._firmware_due
+    _second_controller(mock_api)
+    coordinator._last_discovery = None
+    await coordinator.async_refresh()
+    assert CODE2 in coordinator.devices
+    assert coordinator._firmware_due == due
+    await _fire(hass, 31)
+    assert mock_api.get_otas.await_count == 2
+    assert mock_api.get_otas.await_args.args == ([HOME, HOME2],)
+
+
+async def test_no_controller_yet(hass: HomeAssistant, mock_api, config_entry, caplog) -> None:
+    """Set up while the app holds the session (no devices): read once one is found."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.york_smart_home")
+    mock_api.get_wire_controllers.side_effect = YorkSessionTakenError("HTTP 401")
+    await _setup(hass, config_entry)
+    coordinator = config_entry.runtime_data
+    assert coordinator.devices == {}
+    assert coordinator.session_yielded
+    await _first_read(hass)
+    mock_api.get_otas.assert_not_awaited()
+    assert "York firmware check put off: no wire controller (yet)" in caplog.text
+    assert coordinator.firmware_error is None
+    # Looked at again after OTA_RETRY_INTERVAL.
+    assert coordinator._firmware_due == pytest.approx(hass.loop.time() + OTA_RETRY_INTERVAL, abs=5)
+
+    # The session taken back well before that (here: "always reclaim"
+    # switched on): the controller is discovered, and read a minute later.
+    mock_api.get_wire_controllers.side_effect = None
+    await _set_options(hass, config_entry, reclaim_session=True)
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert not coordinator.session_yielded
+    mock_api.relogin.assert_awaited_once()
+    entity_id = _firmware_id(hass)
+    assert hass.states.get(entity_id).state == "unknown"
+    assert coordinator._firmware_due == pytest.approx(hass.loop.time() + OTA_RECHECK_DELAY, abs=5)
+    await _fire(hass, OTA_RECHECK_DELAY - 10)
+    mock_api.get_otas.assert_not_awaited()
+    await _fire(hass, OTA_RECHECK_DELAY + 1)
+    mock_api.get_otas.assert_awaited_once_with([HOME])
+    assert hass.states.get(entity_id).state == "off"
+
+
+async def test_no_read_while_polls_fail(hass: HomeAssistant, mock_api, config_entry) -> None:
+    """Polls failing (the entities unavailable): no read until they work again."""
+    await _setup(hass, config_entry)
+    coordinator = config_entry.runtime_data
+    good = mock_api.get_status.side_effect
+    mock_api.get_status.side_effect = YorkConnectionError("HTTP 502")
+    for _ in range(FAILURES_BEFORE_UNAVAILABLE):
+        await coordinator.async_refresh()
+    assert not coordinator.last_update_success
+    await _first_read(hass)
+    mock_api.get_otas.assert_not_awaited()
+    assert coordinator.firmware_error is None
+    assert coordinator._firmware_due == pytest.approx(hass.loop.time() + OTA_RETRY_INTERVAL, abs=5)
+
+    mock_api.get_status.side_effect = good
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success
+    assert hass.states.get(_firmware_id(hass)).state == "unknown"
+    await _fire(hass, OTA_RETRY_INTERVAL + 1)
+    mock_api.get_otas.assert_awaited_once_with([HOME])
     assert hass.states.get(_firmware_id(hass)).state == "off"
 
 
@@ -950,9 +1291,10 @@ async def test_no_requests_while_yielded(hass: HomeAssistant, mock_api, config_e
 
 
 async def test_no_requests_while_paused(hass: HomeAssistant, mock_api, config_entry) -> None:
-    """Rate limited or an app update demanded: no read either."""
+    """Rate limited or an app update demanded: no read either; read once it is over."""
     await _setup(hass, config_entry)
     coordinator = config_entry.runtime_data
+    good = mock_api.get_status.side_effect
     mock_api.get_status.side_effect = YorkRateLimitError(3600)
     await coordinator.async_refresh()
     await _first_read(hass)
@@ -963,6 +1305,15 @@ async def test_no_requests_while_paused(hass: HomeAssistant, mock_api, config_en
     assert coordinator.client_outdated
     await _fire(hass, OTA_RETRY_INTERVAL + 1)
     mock_api.get_otas.assert_not_awaited()
+
+    # The hourly pause over, the cloud answers again: read at the next try.
+    mock_api.get_status.side_effect = good
+    with _later(CLIENT_OUTDATED_PAUSE + 1):
+        await coordinator.async_refresh()
+    assert not coordinator.client_outdated
+    await _fire(hass, OTA_RETRY_INTERVAL + 1)
+    mock_api.get_otas.assert_awaited_once_with([HOME])
+    assert hass.states.get(_firmware_id(hass)).state == "off"
 
 
 async def test_unload_stops_checks(hass: HomeAssistant, mock_api, config_entry) -> None:
@@ -1022,6 +1373,51 @@ async def test_diagnostics(hass: HomeAssistant, mock_api, config_entry) -> None:
     assert "400004" not in firmware
     assert "400006" not in firmware
     assert "ouIuId" not in firmware
+
+
+async def test_diagnostics_unknown_shapes(hass: HomeAssistant, mock_api, config_entry) -> None:
+    """Fields the app never reads: plain values only, never the controller code.
+
+    statusProgress is null in the only sample; were it a structure (say
+    the progress per indoor unit, whose ids start with the controller's
+    code), only its type and size are exported.
+    """
+    update = {
+        **IU_UPDATE,
+        "confirmTime": {"by": CODE},
+        "otaProcess": [f"{CODE}0003", 50],
+        "confirmFlg": 1,
+        "romVersionD": f"{CODE}0003-R2",
+    }
+    entry = _entry(update)
+    entry["statusProgress"] = {"ouIuList": [{"ouIuId": f"{CODE}0003", "progress": 50}]}
+    _serve(mock_api, entry)
+    await _setup(hass, config_entry)
+    await _first_read(hass)
+    diagnostics = await async_get_config_entry_diagnostics(hass, config_entry)
+    firmware = diagnostics["devices"][0]["firmware"]
+    assert firmware["statusProgress"] == "<dict of 1>"
+    assert firmware["otaList"] == [
+        {
+            "otaType": "2",
+            "otaDesc": "室内机程序优化",
+            "confirmFlg": 1,
+            "confirmTime": "<dict of 1>",
+            "otaProcess": "<list of 2>",
+            "popupFlg": "1",
+            "romVersionD": "<xkqCode>0003-R2",
+            "indoor_unit_count": 1,
+        }
+    ]
+    assert CODE not in json.dumps(diagnostics, ensure_ascii=False)
+
+    # Plain values as they are.
+    for progress in ("50", 50, 12.5, True):
+        entry["statusProgress"] = progress
+        _serve(mock_api, entry)
+        await _fire(hass, OTA_INTERVAL + 1)
+        diagnostics = await async_get_config_entry_diagnostics(hass, config_entry)
+        assert diagnostics["devices"][0]["firmware"]["statusProgress"] == progress
 
 
 async def test_diagnostics_account(hass: HomeAssistant, mock_api, config_entry) -> None:

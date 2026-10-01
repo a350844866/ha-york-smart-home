@@ -138,7 +138,9 @@ _STATUS_PATTERNS = re.compile(
 )
 # A controller's entry of the firmware answer (getOtas) and its offered
 # updates: flags, types and release notes. Never the xkqCode, the update's
-# otaId, nor the indoor unit ids of its ouIuList (only counted).
+# otaId, nor the indoor unit ids of its ouIuList (only counted). Only plain
+# values are exported (_plain): the app never reads statusProgress and
+# several others, so what they may hold is unknown.
 _FIRMWARE_KEYS = ("otaFlg", "statusProgress")
 _OTA_KEYS = (
     "otaType",
@@ -170,20 +172,36 @@ def _entries(value: Any) -> list[dict[str, Any]]:
     return [entry for entry in value if isinstance(entry, dict)] if isinstance(value, list) else []
 
 
-def _firmware(entry: dict[str, Any] | None) -> dict[str, Any] | None:
+def _plain(value: Any, code: str) -> Any:
+    """A number, flag or null as it is, a text without ``code``; else type and size.
+
+    For answer fields whose shape is unknown: a structure could hold ids
+    (e.g. indoor unit ids, which start with the controller's code), so it
+    is left out, and the controller's code is taken out of texts.
+    """
+    if isinstance(value, str):
+        return value.replace(code, "<xkqCode>") if code else value
+    if value is None or isinstance(value, int | float | bool):
+        return value
+    if isinstance(value, dict | list):
+        return f"<{type(value).__name__} of {len(value)}>"
+    return f"<{type(value).__name__}>"
+
+
+def _firmware(entry: dict[str, Any] | None, code: str) -> dict[str, Any] | None:
     """A controller's entry of the last firmware answer (None: not read yet)."""
     if entry is None:
         return None
     updates = []
     for update in _entries(entry.get("otaList")):
-        allowed = {key: update[key] for key in _OTA_KEYS if key in update}
+        allowed = {key: _plain(update[key], code) for key in _OTA_KEYS if key in update}
         if isinstance(update.get("ouIuList"), list):
             allowed["indoor_unit_count"] = len(update["ouIuList"])
         updates.append(allowed)
     return {
         # Whether the answer had an entry for the controller at all.
         "listed": bool(entry),
-        **{key: entry[key] for key in _FIRMWARE_KEYS if key in entry},
+        **{key: _plain(entry[key], code) for key in _FIRMWARE_KEYS if key in entry},
         "otaList": updates,
     }
 
@@ -239,7 +257,7 @@ async def async_get_config_entry_diagnostics(
                 "info": {k: dev.info[k] for k in _INFO_KEYS if k in dev.info},
                 "status": _filter(dev.status, _STATUS_PATTERNS),
                 "constants": _filter(dev.constants, _CONSTANT_PATTERNS),
-                "firmware": _firmware(dev.firmware),
+                "firmware": _firmware(dev.firmware, dev.code),
             }
             for index, dev in enumerate(coordinator.devices.values(), start=1)
         ],
