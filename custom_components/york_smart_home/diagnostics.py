@@ -50,6 +50,7 @@ from .const import (
     LOCK_MODE,
     LOCK_TEMP,
     MODES,
+    SCENE_FLAG_KEYS,
     SETTINGS_KEYS,
     STANDARD_STATUS_BANNERS,
     STATUS_BANNERS,
@@ -169,6 +170,7 @@ def _scene(scene: YorkScene) -> dict[str, Any]:
         "type": record.get("type"),
         "entity": entity,
         "present": scene.present,
+        "offered": scene.offered,
         "openFlg": record.get("openFlg"),
         "actionFlg": record.get("actionFlg"),
         "favoriteFlg": record.get("favoriteFlg"),
@@ -217,6 +219,8 @@ async def async_get_config_entry_diagnostics(
                 "home": index,
                 "present": home.present,
                 "scenes_loaded": home.loaded,
+                # Feature flags only (booleans or "0"/"1").
+                "flags": {k: v for k, v in home.flags.items() if k in SCENE_FLAG_KEYS},
                 "scenes": [_scene(scene) for scene in home.scenes.values()],
             }
             for index, home in enumerate(coordinator.homes.values(), start=1)

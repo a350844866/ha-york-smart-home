@@ -89,5 +89,7 @@ class YorkSceneButton(YorkSceneEntity, ButtonEntity):
     cloud to run them.
     """
 
+    _scene_control = RUN
+
     async def async_press(self) -> None:
         await self.coordinator.async_run_scene(self._home_id, self._smart_id)

@@ -30,6 +30,7 @@ from .const import (
     APP_TAG,
     APP_VERSION,
     CTRL_TYPE_SINGLE,
+    SCENE_FLAG_KEYS,
     TIMER_HOURS,
 )
 
@@ -93,6 +94,16 @@ class YorkSessionTakenError(YorkAuthError):
     HTTP 401 status only and never logs in again by itself; a body code
     "401" is treated the same way as a precaution. Raised instead of renewing the session unless
     the client was asked to reclaim it.
+    """
+
+
+class YorkForbiddenError(YorkAuthError):
+    """HTTP 403 / code 403.
+
+    Renewed like any rejected session, except on an optional read
+    (``_authed(optional=True)``), where it is raised as YorkApiError: the
+    app itself has no 403 handling at all (handleResponse only knows
+    LOGIN_ELSEWHERE and code 300).
     """
 
 
@@ -176,6 +187,16 @@ class Session:
     login_version: int = 0
 
 
+@dataclass
+class HomeScenes:
+    """A home's cloud scenes and the feature flags the app shows them by."""
+
+    # Scene records (smartList), as the app's scene pages use them.
+    scenes: list[dict[str, Any]]
+    # The home detail's feature flags (SCENE_FLAG_KEYS present in the answer).
+    flags: dict[str, Any]
+
+
 class YorkApi:
     """Client covering login, discovery, status and control for one account."""
 
@@ -246,7 +267,7 @@ class YorkApi:
                 if resp.status == 401:
                     raise YorkSessionTakenError(f"{path}: HTTP 401")
                 if resp.status == 403:
-                    raise YorkAuthError(f"{path}: HTTP 403")
+                    raise YorkForbiddenError(f"{path}: HTTP 403")
                 if resp.status == 429:
                     retry = resp.headers.get("Retry-After", "")
                     raise YorkRateLimitError(
@@ -271,7 +292,7 @@ class YorkApi:
             # The app only checks the HTTP status for this; treated alike to be safe.
             raise YorkSessionTakenError(f"{path}: code 401")
         if body["code"] == "403":
-            raise YorkAuthError(f"{path}: code 403")
+            raise YorkForbiddenError(f"{path}: code 403")
         if body["code"] == "300":
             # handleResponse's only special code: force an app update.
             data = body.get("data") if isinstance(body.get("data"), dict) else {}
@@ -296,6 +317,7 @@ class YorkApi:
         json: Any = None,
         envelope: bool = False,
         reclaim: bool = False,
+        optional: bool = False,
     ) -> Any:
         """Authenticated request; renews the session once if it was rejected.
 
@@ -303,6 +325,12 @@ class YorkApi:
         ``reclaim`` (an explicit user action) or ``reclaim_session`` is set;
         otherwise YorkSessionTakenError is raised so the caller can leave the
         session to that device, as the app does.
+
+        ``optional``: a read beside the status polling (the scene list, a
+        scene run's result). A 403 there refuses that resource, not the
+        session (the status poll just worked with the same token), so it is
+        raised as YorkApiError without logging in again, which would log
+        the phone app out for nothing.
         """
         if self.auth is None:
             await self._renew(None)
@@ -318,7 +346,9 @@ class YorkApi:
                 # An explicit action takes the session back even right after
                 # a renewal; automatic reclaiming stops on ping-pong.
                 await self._renew(used, guard=not reclaim)
-            except YorkAuthError:
+            except YorkAuthError as err:
+                if optional and isinstance(err, YorkForbiddenError):
+                    raise YorkApiError(str(err)) from None
                 if attempt == 2:
                     raise
                 _LOGGER.debug("Session rejected on %s, renewing", path)
@@ -638,23 +668,42 @@ class YorkApi:
 
     # ---------------------------------------------------------------- scenes
 
-    async def get_scenes(self, home_id: int) -> list[dict[str, Any]]:
-        """Cloud scenes (智能场景) of a home, as the app's scenes tab lists them.
+    async def get_scenes(self, home_id: int, *, reclaim: bool = False) -> HomeScenes:
+        """Cloud scenes (智能场景) of a home and the flags the app shows them by.
 
-        GET /api/apptimer/homes/{homeId}/smarts (SCENE_GET_ALL_SCENE): the
-        tab keeps ``data.smartList`` when the code is "200". A missing list
-        means no scenes; records without a smartId cannot be addressed and
-        are skipped.
+        GET /api/apphome/homes/{homeId} (FAMILY_DETAIL) → ``data.homeDetail``.
+        The scenes tab reads this detail each time it opens (ionViewWillEnter)
+        and filters the scenes by its feature flags (leaveEnergyFlg, sceneKFlg
+        ...). Its ``smartList`` holds the home's scene records, the ones not
+        on the home page too (a captured answer lists a favoriteFlg "0"
+        scene: the home page drops those itself), and the home page runs and
+        switches scenes from these very records with the requests the scenes
+        tab sends for the records of its own list (GET .../apptimer/homes/
+        {homeId}/smarts). One request gives records and flags, read at the
+        same moment, and it is the request every app start makes. Only the
+        scene records and the flags (SCENE_FLAG_KEYS) are kept: never the
+        rest of the detail (address, position, phone number, devices).
+
+        A missing list means no scenes; records without a smartId cannot be
+        addressed and are skipped. An optional read: a 403 is YorkApiError.
+        ``reclaim``: part of a user action, which takes a session left to
+        another device back (like control()).
         """
-        data = await self._request("GET", f"/api/apptimer/homes/{home_id}/smarts")
-        if not isinstance(data, dict):
-            raise YorkApiError("smarts: invalid response")
-        scenes = data.get("smartList")
+        data = await self._authed(
+            "GET", f"/api/apphome/homes/{home_id}", reclaim=reclaim, optional=True
+        )
+        detail = data.get("homeDetail") if isinstance(data, dict) else None
+        if not isinstance(detail, dict):
+            raise YorkApiError("home detail: invalid response")
+        scenes = detail.get("smartList")
         if scenes is None:
-            return []
-        if not isinstance(scenes, list):
-            raise YorkApiError("smarts: invalid response")
-        return [s for s in scenes if isinstance(s, dict) and s.get("smartId") is not None]
+            scenes = []
+        elif not isinstance(scenes, list):
+            raise YorkApiError("home detail: invalid scene list")
+        return HomeScenes(
+            scenes=[s for s in scenes if isinstance(s, dict) and s.get("smartId") is not None],
+            flags={key: detail[key] for key in SCENE_FLAG_KEYS if key in detail},
+        )
 
     async def run_scene(
         self,
@@ -709,13 +758,15 @@ class YorkApi:
 
         Body ``{"tokenList": <the run's data>}``; returns the envelope, whose
         code tells how the run went (scenes.result_outcome). A background
-        check, not a user action: it never takes the session back.
+        check, not a user action: it never logs in (a 401 is raised, a 403
+        is YorkApiError).
         """
         return await self._authed(
             "POST",
             "/api/appcontrol/cmds/multiCtrlResult",
             json={"tokenList": token_list},
             envelope=True,
+            optional=True,
         )
 
     async def set_scene_open(
@@ -807,8 +858,12 @@ class YorkApi:
         """A scene change; an explicit user action like control().
 
         "200" is success; "223" a conflict with another scene; any other code
-        a rejection with the server's message (the app shows it).
+        a rejection with the server's message (the app shows it). An unknown
+        updateTime (None) is left out: for a record without one the app
+        copies an undefined field, which JSON.stringify drops.
         """
+        if body.get("updateTime") is None:
+            body = {key: value for key, value in body.items() if key != "updateTime"}
         _LOGGER.debug("Scene %s %s: %s", method, path, body)
         answer = await self._authed(method, path, json=body, envelope=True, reclaim=True)
         _LOGGER.debug("Scene %s %s answered: %s", method, path, answer)

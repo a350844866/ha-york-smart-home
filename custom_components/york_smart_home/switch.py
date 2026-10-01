@@ -154,21 +154,25 @@ async def async_setup_entry(
 class YorkSceneSwitch(YorkSceneEntity, SwitchEntity):
     """A cloud scene the app switches on and off; the cloud runs it while on.
 
-    On as the app's toggle shows it (scenes.scene_is_on); attribute
-    ``status`` is the raw state, including "hangup" (HANGUP, "2").
+    On as the app's toggle shows it, with a hung-up linkage scene as on
+    (scenes.scene_is_on); attribute ``status`` is the raw state, including
+    "hangup" (HANGUP, "2").
     """
+
+    _scene_control = SWITCH
 
     @property
     def is_on(self) -> bool | None:
-        scene = self.scene
-        return scene_is_on(scene.record, self.stype) if scene is not None else None
+        if (scene := self.scene) is None or (stype := self.stype) is None:
+            return None
+        return scene_is_on(scene.record, stype)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
         attributes = super().extra_state_attributes
-        if attributes is None or (scene := self.scene) is None:
+        if attributes is None or (scene := self.scene) is None or (stype := self.stype) is None:
             return attributes
-        return {**attributes, "status": scene_status(scene.record, self.stype)}
+        return {**attributes, "status": scene_status(scene.record, stype)}
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         await self.coordinator.async_set_scene(self._home_id, self._smart_id, True)

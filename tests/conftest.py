@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.york_smart_home.api import Session
+from custom_components.york_smart_home.api import HomeScenes, Session
 from custom_components.york_smart_home.const import (
     CONF_CLIENT_ID,
     CONF_PHONE,
@@ -22,10 +22,13 @@ from homeassistant.const import CONF_PASSWORD
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "device.json").read_text("utf-8"))
 CODE = FIXTURE["device"]["xkqCode"]
 PHONE = "13800000000"
-# The account's cloud scenes: one sleep curve scene, off and without devices.
-SCENES = json.loads((Path(__file__).parent / "fixtures" / "scenes.json").read_text("utf-8"))[
-    "smartList"
+# The account's home detail as the scene read keeps it: one sleep curve
+# scene, off and without devices, and the home's feature flags.
+HOME_DETAIL = json.loads((Path(__file__).parent / "fixtures" / "scenes.json").read_text("utf-8"))[
+    "homeDetail"
 ]
+SCENES = HOME_DETAIL["smartList"]
+SCENE_FLAGS = {key: value for key, value in HOME_DETAIL.items() if key != "smartList"}
 
 
 @pytest.fixture(autouse=True)
@@ -74,7 +77,11 @@ def mock_api():
         api.control = AsyncMock(return_value=None)
         api.set_simple_timer = AsyncMock(return_value={})
         api.cancel_simple_timer = AsyncMock(return_value={})
-        api.get_scenes = AsyncMock(side_effect=lambda home: copy.deepcopy(SCENES))
+        api.get_scenes = AsyncMock(
+            side_effect=lambda home, **kwargs: HomeScenes(
+                copy.deepcopy(SCENES), copy.deepcopy(SCENE_FLAGS)
+            )
+        )
         api.run_scene = AsyncMock(return_value=[{"iezCode": CODE, "hiiotToken": "h1"}])
         api.get_control_results = AsyncMock(
             return_value={"code": "200", "message": "控制成功", "data": []}

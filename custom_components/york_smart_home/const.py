@@ -435,7 +435,34 @@ STANDARD_BRIGHTNESS_LEVELS: Final = 6
 # a home appears, when the session comes back and after any scene action.
 # The app reads it each time the scenes tab opens; scenes change rarely, and
 # the cloud runs them on its own, so the 2 s status loop never asks for them.
+# A scene action reads its home's list again right before sending.
 SCENE_INTERVAL: Final = 600
+# The slow read runs inside a status poll, whose update is published only
+# when the poll returns: a hanging read must not hold the climate entities
+# back for the full request timeout. A read that takes longer counts as a
+# failed scene read (the last list is kept).
+SCENE_READ_TIMEOUT: Final = 10
+# Feature flags of the home detail (homeDetail) kept with the scene list:
+# which scenes the app offers (scenes.SceneType.feature) and the run's
+# ctrlType of leave / return home (scene2Flg). Booleans or "0"/"1".
+SCENE_FLAG_KEYS: Final = (
+    "scene2Flg",
+    "scene5Flg",
+    "leaveEnergyFlg",
+    "nightQuiteFlg",
+    "kszrFlg",
+    "sceneGFlg",
+    "sceneHFlg",
+    "sceneIFlg",
+    "sceneJFlg",
+    "sceneKFlg",
+    "sceneLFlg",
+    "sceneMFlg",
+    "sceneNFlg",
+    "smartSceneFlg",
+    "smartFlg1",
+    "smartFlg2",
+)
 # After running a scene the scenes tab polls multiCtrlResult (getControlResults)
 # every ctrlRefTime and gives up after ctrlTimeOut. The app never copies
 # those two from the login answer, so its defaults apply: 2 s and 20 s.

@@ -557,6 +557,12 @@
     },
     "scene_rejected": {
       "message": "The York cloud rejected the scene {scene}: {message}"
+    },
+    "scene_hidden": {
+      "message": "The 约克智慧家 app does not show the scene {scene} in this home (the feature is switched off for the home), so Home Assistant does not use it either."
+    },
+    "scene_no_sensor": {
+      "message": "The scene {scene} has no YORK air box (约克小方) yet; edit it in the 约克智慧家 app and add one first."
     }
   },
   "issues": {

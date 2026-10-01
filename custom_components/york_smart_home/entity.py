@@ -63,8 +63,10 @@ def async_add_scene_entities(
 ) -> None:
     """Add entities for the cloud scenes, also for ones created in the app later.
 
-    A scene deleted in the app keeps its entity, which becomes unavailable
-    (and available again if the scene comes back).
+    Only for scenes the app shows (YorkScene.offered): one it hides gets
+    its entity once the app would show it. A scene deleted (or hidden) in
+    the app keeps its entity, which becomes unavailable (and available
+    again if the scene comes back).
     """
     coordinator = entry.runtime_data
     known: set[tuple[int, str]] = set()
@@ -75,7 +77,7 @@ def async_add_scene_entities(
             scene
             for home in coordinator.homes.values()
             for scene in home.scenes.values()
-            if (scene.home_id, scene.smart_id) not in known
+            if scene.present and scene.offered and (scene.home_id, scene.smart_id) not in known
         ]
         if new:
             known.update((scene.home_id, scene.smart_id) for scene in new)
@@ -89,11 +91,14 @@ class YorkSceneEntity(CoordinatorEntity[YorkCoordinator]):
     """One cloud scene (智能场景), on a device for its home.
 
     The name is the scene's name in the app (renaming it there renames the
-    entity, not its entity id).
+    entity, not its entity id). Unavailable while the scene is gone, hidden
+    by the app, or no longer of a type the app gives this entity's control
+    (``_scene_control``: RUN for buttons, SWITCH for switches).
     """
 
     _attr_has_entity_name = True
     _attr_translation_key = "scene"
+    _scene_control: str
 
     def __init__(self, coordinator: YorkCoordinator, scene: YorkScene) -> None:
         super().__init__(coordinator)
@@ -117,10 +122,11 @@ class YorkSceneEntity(CoordinatorEntity[YorkCoordinator]):
         return home.scenes.get(self._smart_id) if home is not None else None
 
     @property
-    def stype(self) -> SceneType:
+    def stype(self) -> SceneType | None:
+        """The scene's type, if it still has this entity's control (else None)."""
         scene = self.scene
-        assert scene is not None and scene.stype is not None
-        return scene.stype
+        stype = scene.stype if scene is not None else None
+        return stype if stype is not None and stype.control == self._scene_control else None
 
     @property
     def available(self) -> bool:
@@ -132,14 +138,16 @@ class YorkSceneEntity(CoordinatorEntity[YorkCoordinator]):
             and home.present
             and scene is not None
             and scene.present
+            and scene.offered
+            and self.stype is not None
         )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
-        if (scene := self.scene) is None or scene.stype is None:
+        if (scene := self.scene) is None or (stype := self.stype) is None:
             return None
         return {
-            "scene_type": scene.stype.key,
+            "scene_type": stype.key,
             "devices": scene_device_count(scene.record),
         }
 

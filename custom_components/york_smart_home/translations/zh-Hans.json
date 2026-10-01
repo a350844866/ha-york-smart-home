@@ -557,6 +557,12 @@
     },
     "scene_rejected": {
       "message": "约克云拒绝了场景「{scene}」：{message}"
+    },
+    "scene_hidden": {
+      "message": "约克智慧家 App 在这个家庭里不显示场景「{scene}」（家庭的该功能未开通），Home Assistant 也不使用它。"
+    },
+    "scene_no_sensor": {
+      "message": "场景「{scene}」中还没有约克小方，请先在约克智慧家 App 中编辑该场景并添加约克小方。"
     }
   },
   "issues": {
