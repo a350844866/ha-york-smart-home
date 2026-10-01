@@ -14,7 +14,6 @@ from homeassistant.components.sensor import (
 from homeassistant.const import PERCENTAGE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.util import dt as dt_util
 
 from .const import (
     KEY_INDOOR_CO2,
@@ -187,7 +186,8 @@ class YorkTimerEnd(YorkClockEntity, SensorEntity):
     past its end, control.TIMER_FIRED_MS), "已设定定时" / "Timer set" while
     the end is not known. Attributes: ``end_time`` (ISO 8601, local time)
     when the end is known, ``action`` ("on" / "off", timerSimpleOnoff) while
-    a timer is pending. A text, not a timestamp: it never reads "unknown".
+    a timer is pending. A text, not a timestamp: it never reads "unknown"
+    (and has a timer icon, icons.json, instead of the timestamp's clock).
     """
 
     _attr_translation_key = "timer_end"
@@ -197,12 +197,12 @@ class YorkTimerEnd(YorkClockEntity, SensorEntity):
 
     @property
     def native_value(self) -> str:
-        return timer_end_text(self.status, dt_util.now(), uses_chinese(self.hass))
+        return timer_end_text(self.status, self._now, uses_chinese(self.hass))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         status = self.status
-        now = dt_util.now()
+        now = self._now
         if not timer_pending(status, now.timestamp() * 1000):
             return {}
         attrs: dict[str, Any] = {}

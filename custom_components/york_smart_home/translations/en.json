@@ -531,7 +531,7 @@
       "message": "Unsupported timer duration: {option}"
     },
     "timer_duration_unknown": {
-      "message": "The running timer's duration is unknown: choose a duration or Off."
+      "message": "The running timer's duration is unknown: choose a duration or Off"
     },
     "auth_failed": {
       "message": "The York Smart Home login is no longer valid; please log in again."

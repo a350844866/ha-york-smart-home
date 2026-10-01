@@ -6,7 +6,8 @@ from collections.abc import Callable, Iterable
 from datetime import datetime
 from typing import Any
 
-from homeassistant.core import CALLBACK_TYPE, callback
+from homeassistant.const import EVENT_CORE_CONFIG_UPDATE
+from homeassistant.core import CALLBACK_TYPE, Event, callback
 from homeassistant.helpers.device_registry import (
     CONNECTION_NETWORK_MAC,
     DeviceEntryType,
@@ -214,10 +215,18 @@ class YorkClockEntity(YorkEntity):
     (session left to the app, HTTP 429, app update demanded) the controller
     entities become unavailable after a few polls; until then each failed
     poll still writes the states.
+
+    The state is computed for one moment, ``_now``: the clock as read on
+    each coordinator update, at each such moment and when Home Assistant's
+    configuration changes (the texts follow its time zone and language; the
+    state is written then too). So everything a state write reads (state,
+    options, attributes) agrees, even when such a moment passes during the
+    write; until the next one the clock alone changes nothing.
     """
 
     _clock_unsub: CALLBACK_TYPE | None = None
     _clock_when: datetime | None = None
+    _clock_now: datetime | None = None
 
     def _clock_change(self, now: datetime) -> datetime | None:
         """The next moment after ``now`` (local time) the clock alone changes the state.
@@ -226,19 +235,33 @@ class YorkClockEntity(YorkEntity):
         """
         raise NotImplementedError
 
+    @property
+    def _now(self) -> datetime:
+        """The moment the state is computed for (local time); the clock while not added."""
+        return dt_util.now() if self._clock_now is None else self._clock_now
+
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
-        self.async_on_remove(self._cancel_clock_write)
-        self._schedule_clock_write()
+        self.async_on_remove(self._clock_removed)
+        self.async_on_remove(
+            self.hass.bus.async_listen(EVENT_CORE_CONFIG_UPDATE, self._config_updated)
+        )
+        self._read_clock()
+
+    @callback
+    def _clock_removed(self) -> None:
+        self._cancel_clock_write()
+        self._clock_now = None
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        self._schedule_clock_write()
+        self._read_clock()
         super()._handle_coordinator_update()
 
     @callback
-    def _schedule_clock_write(self) -> None:
-        now = dt_util.now()
+    def _read_clock(self) -> None:
+        """Take the moment the state is computed for; plan the write at the next change."""
+        self._clock_now = now = dt_util.now()
         when = self._clock_change(now)
         if when is not None and when <= now:
             when = None  # never a moment already past: it would come round again at once
@@ -247,13 +270,22 @@ class YorkClockEntity(YorkEntity):
         self._cancel_clock_write()
         if when is not None:
             self._clock_when = when
+            # Left to run while Home Assistant stops, like HA's own clock
+            # entities (a write then is harmless): HA only cancels interval
+            # timers then; cancel_on_shutdown has no effect on this one.
             self._clock_unsub = async_track_point_in_utc_time(self.hass, self._clock_write, when)
 
     @callback
     def _clock_write(self, _now: datetime) -> None:
         self._clock_unsub = None
         self._clock_when = None
-        self._schedule_clock_write()
+        self._read_clock()
+        self.async_write_ha_state()
+
+    @callback
+    def _config_updated(self, _event: Event) -> None:
+        """Home Assistant's configuration changed, maybe its time zone or language."""
+        self._read_clock()
         self.async_write_ha_state()
 
     @callback

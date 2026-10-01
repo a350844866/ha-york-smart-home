@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from datetime import UTC, datetime, timedelta
+import itertools
 import json
 from pathlib import Path
 import time
@@ -58,10 +59,14 @@ from homeassistant.components.select import (
     SERVICE_SELECT_PREVIOUS,
 )
 from homeassistant.components.sensor import SensorDeviceClass
-from homeassistant.const import ATTR_ENTITY_ID, STATE_UNAVAILABLE
-from homeassistant.core import HomeAssistant
+from homeassistant.const import ATTR_ENTITY_ID, EVENT_CORE_CONFIG_UPDATE, STATE_UNAVAILABLE
+from homeassistant.core import HomeAssistant, State
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity_platform import async_get_platforms
+from homeassistant.helpers.icon import async_get_icons
+from homeassistant.helpers.state import async_reproduce_state
+from homeassistant.util import dt as dt_util
 from homeassistant.util.async_ import get_scheduled_timer_handles
 
 from .conftest import CODE, FIXTURE
@@ -433,19 +438,41 @@ def test_timer_text_changes_at_repeated_midnight() -> None:
 
 
 @pytest.mark.parametrize(
+    ("chinese", "texts"),
+    [
+        (True, ("明天 00:00 关机", "00:00 关机", "无定时")),
+        (False, ("Off at 00:00 tomorrow", "Off at 00:00", "No timer")),
+    ],
+)
+def test_timer_end_at_midnight(chinese: bool, texts: tuple[str, str, str]) -> None:
+    """An end exactly at local midnight: tomorrow up to it, today from it on, then fired."""
+    midnight = _local(2026, 10, 2, 0, 0)
+    status = _timer(midnight)
+    last = midnight - timedelta(microseconds=1)  # 23:59:59.999999
+    assert timer_end_text(status, last, chinese) == texts[0]
+    assert timer_text_changes_at(status, last) == midnight
+    assert timer_end_text(status, midnight, chinese) == texts[1]
+    assert timer_text_changes_at(status, midnight) == midnight + FIRED
+    assert timer_end_text(status, midnight + FIRED - timedelta(milliseconds=1), chinese) == texts[1]
+    assert timer_end_text(status, midnight + FIRED, chinese) == texts[2]
+    assert timer_text_changes_at(status, midnight + FIRED) is None
+    assert timer_end_time(status, midnight).isoformat() == "2026-10-02T00:00:00+08:00"
+
+
+@pytest.mark.parametrize(
     ("path", "running", "end_time", "error"),
     [
         (
             "strings.json",
             "Running (duration unknown)",
             "End time",
-            "The running timer's duration is unknown: choose a duration or Off.",
+            "The running timer's duration is unknown: choose a duration or Off",
         ),
         (
             "translations/zh-Hans.json",
             "定时中（时长未知）",
             "结束时间",
-            "定时时长未知，请选择具体时长或「关闭定时」。",
+            "定时时长未知，请选择具体时长或「关闭定时」",
         ),
     ],
 )
@@ -584,6 +611,12 @@ async def test_timer_end_was_a_timestamp(hass: HomeAssistant, mock_api, config_e
     state = hass.states.get(old.entity_id)
     assert state.state == "Off at 13:00"
     assert "device_class" not in state.attributes
+
+
+async def test_timer_end_icon(hass: HomeAssistant) -> None:
+    """A timer icon (icons.json): without the timestamp class it would be the generic one."""
+    icons = await async_get_icons(hass, "entity", integrations=[DOMAIN])
+    assert icons == {DOMAIN: {"sensor": {"timer_end": {"default": "mdi:timer-outline"}}}}
 
 
 async def test_timer_set_elsewhere(hass: HomeAssistant, mock_api, config_entry) -> None:
@@ -756,7 +789,7 @@ async def test_running_listed_only_while_current(
 
 
 async def test_select_running_changes_nothing(hass: HomeAssistant, mock_api, config_entry) -> None:
-    """While it is the state (e.g. a scene restores it): no request at all."""
+    """While it is the state (e.g. an automation selects it again): no request at all."""
     _with_status(mock_api, _timer_status(3))
     await _setup(hass, config_entry)
     select = _select(hass)
@@ -780,10 +813,30 @@ async def test_select_running_changes_nothing(hass: HomeAssistant, mock_api, con
     assert entry.capabilities[ATTR_OPTIONS] == ["off", *TIMER_OPTIONS]
 
 
+async def test_scene_restore_never_selects_running(
+    hass: HomeAssistant, mock_api, config_entry, caplog: pytest.LogCaptureFixture
+) -> None:
+    """HA's scene restore skips "running" while it is the state, and refuses it once not listed."""
+    _with_status(mock_api, _timer_status(3))
+    await _setup(hass, config_entry)
+    entity_id = _entity(hass, SELECT_DOMAIN, "simple_timer")
+    with patch.object(YorkSimpleTimer, "async_select_option") as select_option:
+        await async_reproduce_state(hass, State(entity_id, "running"))
+        assert _select(hass).state == "running"
+        _with_status(mock_api, _status())  # cancelled in the app
+        await config_entry.runtime_data.async_refresh()
+        await hass.async_block_till_done()
+        assert _select(hass).state == "off"
+        await async_reproduce_state(hass, State(entity_id, "running"))
+        select_option.assert_not_called()
+    assert f"Invalid state specified for {entity_id}: running" in caplog.text
+    assert _select(hass).state == "off"
+
+
 async def test_select_running_no_longer_current(
     hass: HomeAssistant, mock_api, config_entry
 ) -> None:
-    """Listed a moment ago, gone by the time it is handled: a translated error."""
+    """Not the state when handled (a direct call; HA refuses it unlisted): a translated error."""
     await _setup(hass, config_entry)
     coordinator = config_entry.runtime_data
     mock_api.get_status.reset_mock()
@@ -1333,3 +1386,207 @@ async def test_timer_entities_while_polls_fail(hass: HomeAssistant, mock_api, co
     assert _end(hass).state == STATE_UNAVAILABLE
     assert _select(hass).state == STATE_UNAVAILABLE
     unsub()
+
+
+@pytest.mark.parametrize(
+    ("language", "texts"),
+    [
+        ("zh-Hans", ("明天 00:00 关机", "00:00 关机", "无定时")),
+        ("en", ("Off at 00:00 tomorrow", "Off at 00:00", "No timer")),
+    ],
+)
+async def test_end_at_midnight_without_polling(
+    hass: HomeAssistant,
+    mock_api,
+    config_entry,
+    freezer: FrozenDateTimeFactory,
+    language: str,
+    texts: tuple[str, str, str],
+) -> None:
+    """An end exactly at midnight: tomorrow up to it, today from it on, then no timer."""
+    midnight = _local(2026, 10, 2, 0, 0)
+    freezer.move_to(_local(2026, 10, 1, 23, 30))
+    _with_status(mock_api, _status(**_timer(midnight)))
+    await _setup(hass, config_entry, language=language, polling=False)
+    polls = mock_api.get_status.await_count
+    sensor = _entity(hass, "sensor", "timer_end")
+    select = _entity(hass, SELECT_DOMAIN, "simple_timer")
+    assert _end(hass).state == texts[0]
+    assert _clock_writes(hass) == {sensor: midnight, select: midnight + FIRED}
+    await _at(hass, freezer, midnight - timedelta(microseconds=1))
+    assert _end(hass).state == texts[0]
+    await _at(hass, freezer, midnight)
+    end = _end(hass)
+    assert end.state == texts[1]
+    assert end.attributes["end_time"] == "2026-10-02T00:00:00+08:00"
+    assert _select(hass).state == "running"
+    assert _clock_writes(hass) == {sensor: midnight + FIRED, select: midnight + FIRED}
+    await _at(hass, freezer, midnight + FIRED - timedelta(milliseconds=1))
+    assert _end(hass).state == texts[1]
+    await _at(hass, freezer, midnight + FIRED)
+    assert _end(hass).state == texts[2]
+    assert _select(hass).state == "off"
+    assert mock_api.get_status.await_count == polls
+    assert _clock_writes(hass) == {}
+
+
+@pytest.mark.parametrize(
+    ("language", "before", "after"),
+    [
+        ("zh-Hans", "已设定定时", "明天 12:00 关机"),
+        ("en", "Timer set", "Off at 12:00 tomorrow"),
+    ],
+)
+async def test_end_comes_within_25_hours_without_polling(
+    hass: HomeAssistant,
+    mock_api,
+    config_entry,
+    freezer: FrozenDateTimeFactory,
+    language: str,
+    before: str,
+    after: str,
+) -> None:
+    """An end over 25 h ahead is not shown ("Timer set") until it is within 25 h."""
+    end = NOW + timedelta(hours=26)  # 12:00 tomorrow
+    _with_status(mock_api, _status(**_timer(end)))
+    await _setup(hass, config_entry, language=language, polling=False)
+    polls = mock_api.get_status.await_count
+    sensor = _entity(hass, "sensor", "timer_end")
+    state = _end(hass)
+    assert state.state == before
+    assert state.attributes["action"] == "off"
+    assert "end_time" not in state.attributes
+    assert _clock_writes(hass)[sensor] == NOW + timedelta(hours=1)
+    await _at(hass, freezer, NOW + timedelta(hours=1) - timedelta(milliseconds=1))
+    assert _end(hass).state == before
+    await _at(hass, freezer, NOW + timedelta(hours=1))
+    state = _end(hass)
+    assert state.state == after
+    assert state.attributes["end_time"] == "2026-10-02T12:00:00+08:00"
+    assert state.attributes["action"] == "off"
+    assert _select(hass).state == "running"
+    assert mock_api.get_status.await_count == polls
+    # Next: midnight, when tomorrow becomes today.
+    assert _clock_writes(hass)[sensor] == _local(2026, 10, 2, 0, 0)
+
+
+def _entity_object(hass: HomeAssistant, entity_id: str):
+    """The entity object behind an entity id."""
+    return next(
+        platform.entities[entity_id]
+        for platform in async_get_platforms(hass, DOMAIN)
+        if entity_id in platform.entities
+    )
+
+
+async def test_one_moment_per_state_write(
+    hass: HomeAssistant, mock_api, config_entry, freezer: FrozenDateTimeFactory
+) -> None:
+    """A state write reads the clock once, even if the timer fires during the write.
+
+    Here each reading of the clock is a millisecond after the one before,
+    the first just before the timer counts as fired. The state, the listed
+    options and the attributes are all those of the update's moment: the
+    select never reads "unknown" (HA takes its state from the option and
+    checks it against the options), and the text agrees with its attributes.
+    """
+    end = NOW + timedelta(minutes=30)
+    _with_status(mock_api, _status(**_timer(end)))
+    await _setup(hass, config_entry, polling=False)
+    select_id = _entity(hass, SELECT_DOMAIN, "simple_timer")
+    sensor_id = _entity(hass, "sensor", "timer_end")
+    edge = end + timedelta(milliseconds=TIMER_FIRED_MS)  # fired right after it
+    for entity_id in (select_id, sensor_id):
+        ticks = itertools.count()
+
+        def clock(time_zone=None, ticks=ticks):
+            moment = edge + timedelta(milliseconds=next(ticks) - 0.5)
+            return moment.astimezone(time_zone or SHANGHAI)
+
+        with (
+            patch.object(dt_util, "now", side_effect=clock),
+            patch.object(dt_util, "utcnow", side_effect=lambda clock=clock: clock(UTC)),
+        ):
+            _entity_object(hass, entity_id)._handle_coordinator_update()
+    select = _select(hass)
+    assert select.state == "running"
+    assert select.attributes[ATTR_OPTIONS] == ["off", "running", *TIMER_OPTIONS]
+    assert select.attributes["action"] == "off"
+    state = _end(hass)
+    assert state.state == "Off at 10:30"
+    assert state.attributes["end_time"] == "2026-10-01T10:30:00+08:00"
+    assert state.attributes["action"] == "off"
+    # Written again once the timer counts as fired.
+    assert _clock_writes(hass) == {select_id: end + FIRED, sensor_id: end + FIRED}
+    await _at(hass, freezer, end + FIRED)
+    assert _select(hass).state == "off"
+    assert _end(hass).state == "No timer"
+
+
+async def test_time_zone_and_language_changes(
+    hass: HomeAssistant, mock_api, config_entry, freezer: FrozenDateTimeFactory
+) -> None:
+    """A new time zone or language of Home Assistant applies at once, also without polling."""
+    freezer.move_to(_local(2026, 10, 1, 22, 0))
+    _with_status(mock_api, _status(if_run="0", **_timer(_local(2026, 10, 2, 8, 0), turns_on=True)))
+    await _setup(hass, config_entry, polling=False)
+    polls = mock_api.get_status.await_count
+    sensor = _entity(hass, "sensor", "timer_end")
+    assert _end(hass).state == "On at 08:00 tomorrow"
+    assert _clock_writes(hass)[sensor] == _local(2026, 10, 2, 0, 0)
+    # 22:00 in Shanghai is 15:00 in London (summer time); the end is 01:00 there.
+    london = ZoneInfo("Europe/London")
+    await hass.config.async_update(time_zone="Europe/London")
+    await hass.async_block_till_done()
+    end = _end(hass)
+    assert end.state == "On at 01:00 tomorrow"
+    assert end.attributes["end_time"] == "2026-10-02T01:00:00+01:00"
+    assert _clock_writes(hass)[sensor] == datetime(2026, 10, 2, 0, 0, tzinfo=london)
+    await hass.config.async_update(language="zh-Hans")
+    await hass.async_block_till_done()
+    assert _end(hass).state == "明天 01:00 开机"
+    # Midnight in London: tomorrow becomes today.
+    await _at(hass, freezer, datetime(2026, 10, 2, 0, 0, tzinfo=london))
+    assert _end(hass).state == "01:00 开机"
+    assert mock_api.get_status.await_count == polls
+
+
+async def test_no_timer_text_follows_the_language(
+    hass: HomeAssistant, mock_api, config_entry
+) -> None:
+    """Without a timer nothing is planned; the text still follows a new language at once."""
+    await _setup(hass, config_entry, polling=False)
+    assert _end(hass).state == "No timer"
+    assert _clock_writes(hass) == {}
+    await hass.config.async_update(language="zh-Hans")
+    await hass.async_block_till_done()
+    assert _end(hass).state == "无定时"
+    await hass.config.async_update(language="en")
+    await hass.async_block_till_done()
+    assert _end(hass).state == "No timer"
+    # The two clock entities (sensor and select) stop listening when removed.
+    listeners = hass.bus.async_listeners()[EVENT_CORE_CONFIG_UPDATE]
+    assert await hass.config_entries.async_unload(config_entry.entry_id)
+    await hass.async_block_till_done()
+    assert hass.bus.async_listeners().get(EVENT_CORE_CONFIG_UPDATE, 0) == listeners - 2
+
+
+async def test_clock_entity_renamed(hass: HomeAssistant, mock_api, config_entry) -> None:
+    """A new entity id re-adds the entity: its clock write and listener move, none is left."""
+    end = NOW + timedelta(minutes=30)
+    _with_status(mock_api, _status(**_timer(end)))
+    await _setup(hass, config_entry, polling=False)
+    select = _entity(hass, SELECT_DOMAIN, "simple_timer")
+    listeners = hass.bus.async_listeners()[EVENT_CORE_CONFIG_UPDATE]
+    renamed = "sensor.york_timer_end_renamed"
+    er.async_get(hass).async_update_entity(
+        _entity(hass, "sensor", "timer_end"), new_entity_id=renamed
+    )
+    await hass.async_block_till_done()
+    assert _entity(hass, "sensor", "timer_end") == renamed
+    assert hass.states.get(renamed).state == "Off at 10:30"
+    assert _clock_writes(hass) == {renamed: end + FIRED, select: end + FIRED}
+    assert hass.bus.async_listeners()[EVENT_CORE_CONFIG_UPDATE] == listeners
+    await hass.config.async_update(language="zh-Hans")
+    await hass.async_block_till_done()
+    assert hass.states.get(renamed).state == "10:30 关机"

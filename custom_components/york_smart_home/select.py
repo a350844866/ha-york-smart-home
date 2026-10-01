@@ -21,7 +21,6 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.util import dt as dt_util
 
 from . import deflectors
 from .api import as_number
@@ -223,6 +222,8 @@ class YorkSimpleTimer(YorkClockEntity, SelectEntity):
 
     @property
     def options(self) -> list[str]:
+        # For the same moment as the state (YorkClockEntity._now), which HA
+        # takes from current_option and then checks against the options.
         if self.current_option == TIMER_RUNNING:
             return _TIMER_SELECT_OPTIONS_RUNNING
         return _TIMER_SELECT_OPTIONS
@@ -263,7 +264,7 @@ class YorkSimpleTimer(YorkClockEntity, SelectEntity):
 
     @property
     def _fired(self) -> bool:
-        return timer_fired(self.status, dt_util.utcnow().timestamp() * 1000)
+        return timer_fired(self.status, self._now.timestamp() * 1000)
 
     def _clock_change(self, now: datetime) -> datetime | None:
         # A pending timer shows "off" once it counts as fired.
@@ -272,8 +273,10 @@ class YorkSimpleTimer(YorkClockEntity, SelectEntity):
     async def async_select_option(self, option: str) -> None:
         if option == TIMER_RUNNING:
             # Nothing to set: the duration is unknown. Selected while it is
-            # the state (e.g. a scene restoring it) this changes nothing;
-            # otherwise (it was listed a moment ago) the user has to choose.
+            # the state (e.g. an automation selecting the current state
+            # again) this changes nothing. HA refuses it while it is not
+            # listed (the options follow the same moment as the state), so
+            # the error is for a direct call: the user has to choose.
             if self.current_option == TIMER_RUNNING:
                 return
             raise ServiceValidationError(
