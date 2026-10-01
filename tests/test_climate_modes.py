@@ -1,4 +1,4 @@
-"""Climate behavior for controllers with more than the user's four modes,
+"""Climate behavior for controllers with more than the author's four modes,
 constants refreshed from the controller detail, and polling details."""
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from homeassistant.exceptions import ServiceValidationError
 from .conftest import CODE, FIXTURE
 from .test_integration import _call, _last_ctrl, _setup
 
-# Synthetic controller offering every colour-controller mode (the user's unit
+# Synthetic controller offering every colour-controller mode (the author's unit
 # only has cool/heat/fan/dry), with distinct cooling and heating ranges.
 EXTENDED_SUPPORT = {
     "saveene_freshair": "0",  # "1" would make it a fresh-air controller
@@ -79,7 +79,7 @@ def _features(state) -> ClimateEntityFeature:
     return ClimateEntityFeature(state.attributes[ATTR_SUPPORTED_FEATURES])
 
 
-# --------------------------------------------------------------- user device
+# ----------------------------------------------------------- author's device
 
 
 async def test_user_device_has_no_presets(hass: HomeAssistant, mock_api, config_entry) -> None:

@@ -318,13 +318,19 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
         self._relogin_backoff = 0
         # Set while the cloud demands a newer app version (code 300).
         self._outdated_until: float | None = None
-        # Cloud scenes per homeId, read on their own slow timer.
+        # Cloud scenes per homeId, read in a status poll every SCENE_INTERVAL.
         self.homes: dict[int, YorkHome] = {}
         # Monotonic time of the last scene list read (None: read at the next poll).
         self._last_scene_fetch: float | None = None
         # Error of the last failed scene list read, logged once as a warning.
         self._scene_read_error: str | None = None
         self._scene_locks: dict[int, asyncio.Lock] = {}
+        # Scene actions are counted each time one takes its home's fresh
+        # list and each time its request is answered: the count so far, and
+        # per homeId the count at its latest. A list read in a poll that
+        # overlaps one of them may predate it and is dropped (_fetch_scenes).
+        self._scene_actions = 0
+        self._scene_action_at: dict[int, int] = {}
         # Firmware information (getOtas), read on its own slow timer: the
         # armed timer and its due time (loop time), whether a read is in
         # progress, and the error of the last failed read (logged once as a
@@ -460,8 +466,14 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
                 self._last_online = now
 
             if scenes and self._scenes_due(now):
+                actions = self._scene_actions
                 await self._fetch_scenes()
-                self._last_scene_fetch = now
+                if self._scene_actions == actions:
+                    # Unless a scene action took its home's list or got its
+                    # answer meanwhile: then that home's answer was dropped,
+                    # and the read after the action's request
+                    # (_after_scene_action) is still to come.
+                    self._last_scene_fetch = now
         except YorkSessionTakenError as err:
             self._start_yield(now)
             raise UpdateFailed(str(err)) from None
@@ -573,14 +585,14 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
         return {d.home_id: d.info.get("homeName") for d in self.devices.values() if d.present}
 
     def _scenes_due(self, now: float) -> bool:
-        """Read the scene lists on their slow timer, or now for a new or removed home."""
+        """Read the scene lists every SCENE_INTERVAL, or now for a new or removed home."""
         if self._last_scene_fetch is None or now - self._last_scene_fetch >= SCENE_INTERVAL:
             return True
         known = {home_id for home_id, home in self.homes.items() if home.present}
         return known != set(self._scene_homes())
 
     async def _fetch_scenes(self) -> None:
-        """Read the scene list of every home.
+        """Read the scene list of every home, one after another.
 
         Errors of the session as a whole (taken by another device, app
         update demanded, rate limit) propagate like those of the status
@@ -588,6 +600,12 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
         on; the read is retried at the next slow tick. That includes a 403
         (an optional read, see YorkApi.get_scenes) and a read that takes
         longer than SCENE_READ_TIMEOUT.
+
+        A scene action does not wait for this read (nor this read for an
+        action). An answer that arrives after an action of its home took
+        the home's fresh list or got its request's answer may predate
+        them: it is dropped rather than laid over the newer state, and the
+        action's own read and the one after its request bring the list.
         """
         homes = self._scene_homes()
         for home_id, home in self.homes.items():
@@ -598,6 +616,7 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
             home.present = True
             if name:
                 home.name = str(name)
+            actions = self._scene_actions
             try:
                 async with asyncio.timeout(SCENE_READ_TIMEOUT):
                     result = await self.api.get_scenes(home_id)
@@ -621,6 +640,9 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
                 else:
                     _LOGGER.debug("York scenes still unreadable: %s", reason)
                 self._scene_read_error = reason
+                continue
+            if self._scene_action_at.get(home_id, 0) > actions:
+                _LOGGER.debug("York scene list read during a scene action of its home: dropped")
                 continue
             _merge_scenes(home, result)
         if not failed and self._scene_read_error is not None:
@@ -725,10 +747,12 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
         One getOtas request for all homes with a supported controller (the
         app asks for the home it shows); a home missing from an answer for
         several homes keeps what was read before (home_controllers). Put
-        off by OTA_RETRY_INTERVAL, without a request, while there is no
-        controller yet or polling is on hold (the session is left to
-        another device, the cloud demands a newer app or asked to pause, or
-        the polls fail).
+        off by OTA_RETRY_INTERVAL, without a request, while polling is
+        switched off in the entry's system options ("Enable polling for
+        changes", which also stops the status polling, and reloads the
+        entry when changed), there is no controller yet or polling is on
+        hold (the session is left to another device, the cloud demands a
+        newer app or asked to pause, or the polls fail).
 
         A controller installing an update (otaFlg "1" in its status) keeps
         the entry read before, so HA goes on showing the update it offered
@@ -742,8 +766,13 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
         later; they never touch the status polling, which handles errors of
         the session (taken by another device, app update demanded, rate
         limit) by itself when it meets them. A 403 is just a failed read
-        (YorkApi.get_otas).
+        (YorkApi.get_otas); a 401 only logs in again (in the API, before
+        any error) with "always reclaim" on, as for any request.
         """
+        if self.config_entry.pref_disable_polling:
+            # Like DataUpdateCoordinator._schedule_refresh.
+            _LOGGER.debug("York firmware check put off: polling is disabled for the entry")
+            return OTA_RETRY_INTERVAL
         present = [dev for dev in self.devices.values() if dev.present]
         if not present:
             _LOGGER.debug("York firmware check put off: no wire controller (yet)")
@@ -1197,7 +1226,7 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
             except YorkError as err:
                 raise self._scene_error(err, scene) from None
             finally:
-                self._after_scene_action()
+                self._after_scene_action(home_id)
             if stype.request == REPLAY:
                 _LOGGER.debug("York scene %s accepted by the cloud", scene.smart_id)
                 self._release_held(record)
@@ -1255,11 +1284,12 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
             except YorkError as err:
                 raise self._scene_error(err, scene) from None
             finally:
-                self._after_scene_action()
+                self._after_scene_action(home_id)
             # Accepted: show the new state as the app does until the list is
             # read again; the answer's updateTime is the next change's token.
-            # Laid over the record as it is now: the status poll may have
-            # read the list while the request was out.
+            # Laid over the record as it is now: a status poll may have read
+            # the list while the request was out (one sent after this
+            # action's own read; an older one is dropped, _fetch_scenes).
             scene.record = {**scene.record, flag_key(stype): flag}
             _store_update_time(scene, data)
             self.async_update_listeners()
@@ -1289,12 +1319,29 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
             except YorkError as err:
                 raise self._command_error(err) from None
             _merge_scenes(self.homes[home_id], result)
+            # A poll's read of this list that is still out is older.
+            self._count_scene_action(home_id)
             self.async_update_listeners()
             yield self._scene(home_id, smart_id, control)
 
     @callback
-    def _after_scene_action(self) -> None:
-        """After any scene request: read the scene lists again and poll soon."""
+    def _count_scene_action(self, home_id: int) -> None:
+        """A scene action of ``home_id`` took its fresh list or got its answer.
+
+        A list read of that home in a status poll that is out meanwhile may
+        predate it; its answer is dropped (_fetch_scenes).
+        """
+        self._scene_actions += 1
+        self._scene_action_at[home_id] = self._scene_actions
+
+    @callback
+    def _after_scene_action(self, home_id: int) -> None:
+        """After any scene request: read the scene lists again and poll soon.
+
+        A status poll that is reading the lists meanwhile drops the answer
+        for ``home_id`` and does not count as that read (_poll).
+        """
+        self._count_scene_action(home_id)
         self._last_scene_fetch = None
         self._schedule_control_refresh()
 
@@ -1321,7 +1368,9 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
         "2". The app shows a toast; HA logs a failure as a warning. The
         check stops without a verdict, sending nothing more, while the
         session is left to another device or the cloud asked to pause, and
-        on an error of the session, an app update demand or a rate limit.
+        on an error of the session, an app update demand or a rate limit
+        (with "always reclaim" on, the API first logs in again on a 401, as
+        for any request).
         """
         data: Any = None
         for _ in range(SCENE_RESULT_POLLS):

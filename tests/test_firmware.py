@@ -58,7 +58,7 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from .conftest import CODE, FIXTURE, OTAS, ota_homes
-from .test_api import OK, UNAUTHORIZED, _api, _login_body, _resp
+from .test_api import OK, UNAUTHORIZED, _api, _login_body, _resp, _sequence
 from .test_integration import _setup
 from .test_session import _issue, _later, _reauth_started, _set_options, _yield
 
@@ -350,6 +350,22 @@ async def test_get_otas_401_leaves_session(
     with pytest.raises(YorkSessionTakenError):
         await api.get_otas([HOME])
     assert aioclient_mock.call_count == 1  # no login
+
+
+async def test_get_otas_401_with_always_reclaim(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+) -> None:
+    """With "always reclaim" on, a 401 logs in again, as for every request."""
+    aioclient_mock.post(
+        OTAS_URL,
+        side_effect=_sequence(UNAUTHORIZED, {**OK, "data": copy.deepcopy(OTAS["account"])}),
+    )
+    aioclient_mock.get(LOGIN_URL, json=_login_body("fresh"))
+    api = _api(hass, password="pw", auth=Session("tok", 200002), reclaim_session=True)
+    assert await api.get_otas([HOME]) == [{"homeId": HOME, "xkqList": [], "deviceList": []}]
+    assert api.auth.token == "fresh"
+    path = "/api/appdevice/getOtas"
+    assert [call[1].path for call in aioclient_mock.mock_calls] == [path, "/login", path]
 
 
 # =================================================================== entity
@@ -1314,6 +1330,42 @@ async def test_no_requests_while_paused(hass: HomeAssistant, mock_api, config_en
     await _fire(hass, OTA_RETRY_INTERVAL + 1)
     mock_api.get_otas.assert_awaited_once_with([HOME])
     assert hass.states.get(_firmware_id(hass)).state == "off"
+
+
+async def test_no_reads_with_polling_disabled(
+    hass: HomeAssistant, mock_api, config_entry, caplog
+) -> None:
+    """The entry's "Enable polling for changes" off: no firmware reads either.
+
+    Home Assistant then stops the status polling (DataUpdateCoordinator);
+    the firmware timer sends nothing too. Switching the option back on
+    (which reloads the entry in the UI) lets the next check read.
+    """
+    caplog.set_level(logging.DEBUG, logger="custom_components.york_smart_home")
+    config_entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(config_entry, pref_disable_polling=True)
+    assert await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = config_entry.runtime_data
+    assert coordinator.last_update_success  # the first refresh at setup
+    status_calls = mock_api.get_status.await_count
+    await _first_read(hass)
+    await _fire(hass, OTA_RETRY_INTERVAL + 1)
+    mock_api.get_otas.assert_not_awaited()
+    assert mock_api.get_status.await_count == status_calls  # no timed polls either
+    assert "York firmware check put off: polling is disabled for the entry" in caplog.text
+    assert coordinator.firmware_error is None
+    assert coordinator._firmware_due == pytest.approx(hass.loop.time() + OTA_RETRY_INTERVAL, abs=5)
+    assert hass.states.get(_firmware_id(hass)).state == "unknown"
+    diagnostics = await async_get_config_entry_diagnostics(hass, config_entry)
+    assert diagnostics["polling_disabled"] is True
+
+    hass.config_entries.async_update_entry(config_entry, pref_disable_polling=False)
+    await _fire(hass, OTA_RETRY_INTERVAL + 1)
+    mock_api.get_otas.assert_awaited_once_with([HOME])
+    assert hass.states.get(_firmware_id(hass)).state == "off"
+    diagnostics = await async_get_config_entry_diagnostics(hass, config_entry)
+    assert diagnostics["polling_disabled"] is False
 
 
 async def test_unload_stops_checks(hass: HomeAssistant, mock_api, config_entry) -> None:

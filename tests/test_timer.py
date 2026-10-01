@@ -117,7 +117,7 @@ def test_timer_options_match_the_picker() -> None:
 
 
 def test_fixture_has_no_timer() -> None:
-    """The user's controller: timerSimpleFlg null, timerSimpleTime 0, 255."""
+    """The author's controller: timerSimpleFlg null, timerSimpleTime 0, 255."""
     status = FIXTURE["status"]
     assert has_simple_timer(status)
     assert not timer_active(status)

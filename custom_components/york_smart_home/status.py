@@ -193,7 +193,7 @@ def alarms(status: dict[str, Any]) -> list[dict[str, str]] | None:
 
 # The fresh-air colour controller's tiles (室内湿度 %, 室内PM2.5 ug/m3,
 # 室内CO2 ppm, 室内TVOC as a level: 0 good, 1 medium, >= 2 bad). The plain
-# colour page never shows them (the user's unit reports 0 for all of them).
+# colour page never shows them (the author's unit reports 0 for all of them).
 # key -> plausible range; 0 % humidity and 0 ppm CO2 are not readings.
 AIR_QUALITY_RANGES: dict[str, tuple[float, float]] = {
     KEY_INDOOR_HUMIDITY: (1, 100),

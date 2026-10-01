@@ -100,7 +100,7 @@ _STATUS_KEYS = {
     KEY_ENERGY_SAVING,
     KEY_HUMAN_SENSE_TYPE2,
     *STANDARD_STATUS_BANNERS,
-    # Extra functions, humidity, human sensing and air deflectors (batch 5).
+    # Extra functions, humidity, human sensing and air deflectors.
     *(key for key, _ in FUNC_KEYS.values()),
     KEY_SET_HUMIDITY,
     KEY_HUMIDIFICATION,
@@ -245,6 +245,10 @@ async def async_get_config_entry_diagnostics(
         "login_method": "password" if entry.data.get(CONF_PASSWORD) else "sms",
         "has_session": bool(entry.data.get(CONF_SESSION)),
         "options": dict(entry.options),
+        # The entry's system option "Enable polling for changes" is off: no
+        # timed status polls (nor the scene list reads in them), no
+        # firmware reads.
+        "polling_disabled": entry.pref_disable_polling,
         "last_update_success": coordinator.last_update_success,
         "session_yielded": coordinator.session_yielded,
         "client_outdated": coordinator.client_outdated,

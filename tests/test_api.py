@@ -400,6 +400,22 @@ async def test_control_failure_message(
         await _control(hass)
 
 
+async def test_control_403_still_renews(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+) -> None:
+    """A command keeps renewing the session on a 403 (only scene actions take it as a refusal)."""
+    aioclient_mock.post(CTRL_URL, side_effect=_sequence({"code": "403", "message": "x"}, OK))
+    aioclient_mock.get(f"{API_BASE}/login", json=_login_body("fresh"))
+    api = _api(hass, password="pw", auth=Session("old", 200002))
+    await api.control(100001, CODE, "C", "9", {"if_run": "1"})
+    assert api.auth.token == "fresh"
+    assert [call[1].path for call in aioclient_mock.mock_calls] == [
+        "/api/appcontrol/cmds/multiIuOuCtrl",
+        "/login",
+        "/api/appcontrol/cmds/multiIuOuCtrl",
+    ]
+
+
 async def test_status_request_is_incremental(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
 ) -> None:

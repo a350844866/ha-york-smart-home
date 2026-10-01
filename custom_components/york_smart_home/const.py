@@ -236,7 +236,7 @@ MODES_HEAT_RANGE: Final = frozenset(
 )
 
 # ---------------------------------------------------------------------------
-# Read-only running information (batch 3).
+# Read-only running information: status banners, running state, alarms.
 # ---------------------------------------------------------------------------
 
 # Status banners of the colour controller page (xkq-color-control
@@ -297,7 +297,7 @@ ALARM_UNUSED_SLOT: Final = 255
 FAULT_CODE_NONE: Final = "none"
 
 # ---------------------------------------------------------------------------
-# Simple timer (简易定时, batch 4): the control page's "定时" picker
+# Simple timer (简易定时): the control page's "定时" picker
 # (xkq-color-control showTimerModal -> xkq-control.service setTiming).
 # ---------------------------------------------------------------------------
 
@@ -320,7 +320,7 @@ TIMER_HOURS: Final = (
 TIMER_OFF: Final = "off"
 
 # ---------------------------------------------------------------------------
-# Batch 5: capabilities of other controllers (extra functions, humidity, air
+# Capabilities of other controllers (extra functions, humidity, air
 # deflectors, human sensing, fresh-air controllers, xkqType 8).
 # ---------------------------------------------------------------------------
 
@@ -428,19 +428,19 @@ STANDARD_STATUS_BANNERS: Final = {
 STANDARD_BRIGHTNESS_LEVELS: Final = 6
 
 # ---------------------------------------------------------------------------
-# Batch 6a: cloud scenes (智能场景) of the app's scenes tab (see scenes.py).
+# Cloud scenes (智能场景) of the app's scenes tab (see scenes.py).
 # ---------------------------------------------------------------------------
 
-# Read the scene list of every home this often, plus right after setup, when
-# a home appears, when the session comes back and after any scene action.
-# The app reads it each time the scenes tab opens; scenes change rarely, and
-# the cloud runs them on its own, so the 2 s status loop never asks for them.
-# A scene action reads its home's list again right before sending.
+# Read the scene list of every home in a status poll this often (not in every
+# 2 s poll), plus right after setup, when a home appears, when the session
+# comes back and after any scene action. The app reads it each time the
+# scenes tab opens; scenes change rarely, and the cloud runs them on its
+# own. A scene action reads its home's list again right before sending.
 SCENE_INTERVAL: Final = 600
-# The slow read runs inside a status poll, whose update is published only
-# when the poll returns: a hanging read must not hold the climate entities
-# back for the full request timeout. A read that takes longer counts as a
-# failed scene read (the last list is kept).
+# The poll's update is published only when it returns: a hanging read must
+# not hold the climate entities back for the full request timeout. A read
+# that takes longer counts as a failed scene read (the last list is kept).
+# Per home: the homes are read one after another.
 SCENE_READ_TIMEOUT: Final = 10
 # Feature flags of the home detail (homeDetail) kept with the scene list:
 # which scenes the app offers (scenes.SceneType.feature) and the run's
@@ -471,7 +471,7 @@ SCENE_RESULT_TIMEOUT: Final = 20
 SCENE_RESULT_POLLS: Final = SCENE_RESULT_TIMEOUT // SCENE_RESULT_INTERVAL
 
 # ---------------------------------------------------------------------------
-# Batch 6b: firmware update information (OTA, see firmware.py).
+# Firmware update information (OTA, see firmware.py).
 # ---------------------------------------------------------------------------
 
 # The app asks getOtas each time its home page, a controller's settings page

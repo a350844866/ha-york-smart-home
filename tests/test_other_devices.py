@@ -1,6 +1,6 @@
-"""Entities for controllers with more capabilities than the user's unit.
+"""Entities for controllers with more capabilities than the author's unit.
 
-Synthetic controllers built from the user's real record: extra functions,
+Synthetic controllers built from the author's controller record: extra functions,
 humidity, air deflectors, human sensing, a fresh-air colour controller and
 the standard controller (xkqType 8).
 """
@@ -115,7 +115,7 @@ def _features(hass) -> ClimateEntityFeature:
     return ClimateEntityFeature(state.attributes[ATTR_SUPPORTED_FEATURES])
 
 
-# ---------------------------------------------------------------- user unit
+# ------------------------------------------------------------ author's unit
 
 
 async def test_user_device_gets_no_new_entities(
@@ -218,7 +218,7 @@ async def test_unsupported_change_does_not_reclaim_session(
 ) -> None:
     """A change the controller can never accept is refused without logging
     the phone app out."""
-    await _setup(hass, config_entry)  # the user's unit: no extra functions
+    await _setup(hass, config_entry)  # the author's unit: no extra functions
     coordinator = config_entry.runtime_data
     mock_api.get_status.side_effect = YorkSessionTakenError("HTTP 401")
     await coordinator.async_refresh()

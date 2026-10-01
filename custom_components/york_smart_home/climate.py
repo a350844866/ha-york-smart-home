@@ -107,7 +107,7 @@ class YorkClimate(YorkEntity, ClimateEntity):
     @property
     def preset_modes(self) -> list[str] | None:
         # Only worth showing when the controller has more than the basic
-        # modes (the user's cool/heat/fan/dry unit shows no presets).
+        # modes (the author's cool/heat/fan/dry unit shows no presets).
         modes = supported_modes(self.status, self.profile)
         return modes if any(m not in BASIC_MODES for m in modes) else None
 

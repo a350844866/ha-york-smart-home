@@ -248,7 +248,7 @@ async def test_banners_from_fixture(hass: HomeAssistant, mock_api, config_entry)
     for key, enabled in STATUS_BANNERS.items():
         entity_id = _entity(hass, "binary_sensor", key)
         if key == "communication_exception":
-            # Not reported, and the user's unit has no 3D human sensor.
+            # Not reported, and the author's unit has no 3D human sensor.
             assert entity_id is None
             continue
         assert entity_id, key

@@ -729,6 +729,37 @@ async def test_control_results_request(
     assert api.auth.token == "tok"
 
 
+@pytest.mark.parametrize("read", ["list", "result"])
+async def test_background_reads_with_always_reclaim(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, read
+) -> None:
+    """With "always reclaim" on, a 401 logs in again on these reads too.
+
+    As for every request (the status polling does the same): the option
+    means HA always takes the session back. A 403 still never logs in.
+    """
+    url, path = (
+        (DETAIL_URL, f"/api/apphome/homes/{HOME}")
+        if read == "list"
+        else (RESULT_URL, "/api/appcontrol/cmds/multiCtrlResult")
+    )
+    answer = {**OK, "data": {"homeDetail": {}}} if read == "list" else {**OK, "data": []}
+    getattr(aioclient_mock, "get" if read == "list" else "post")(
+        url, side_effect=_sequence(UNAUTHORIZED, answer, {"code": "403", "message": "无权限"})
+    )
+    aioclient_mock.get(LOGIN_URL, json=_login_body("fresh"))
+    api = _api(hass, password="pw", auth=Session("tok", 200002), reclaim_session=True)
+
+    def call():
+        return api.get_scenes(HOME) if read == "list" else api.get_control_results([])
+
+    await call()
+    assert api.auth.token == "fresh"
+    with pytest.raises(YorkApiError, match="403"):
+        await call()
+    assert [c[1].path for c in aioclient_mock.mock_calls] == [path, "/login", path, path]
+
+
 async def test_open_flag_request(hass: HomeAssistant, aioclient_mock: AiohttpClientMocker) -> None:
     url = f"{API_BASE}/api/apptimer/homes/{HOME}/smarts/{SLEEP_ID}/openFlg"
     aioclient_mock.put(
@@ -862,6 +893,86 @@ async def test_scene_change_reclaims_session(
     api = _api(hass, password="pw", auth=Session("old", 200002))
     await api.set_scene_open(HOME, SLEEP_ID, "1", UPDATE_TIME)
     assert api.auth.token == "fresh"
+
+
+# Every scene request of a user action: method, path, the call.
+SCENE_ACTIONS = {
+    "open_flag": (
+        "put",
+        f"/api/apptimer/homes/{HOME}/smarts/{SLEEP_ID}/openFlg",
+        lambda api: api.set_scene_open(HOME, SLEEP_ID, "1", UPDATE_TIME),
+    ),
+    "recommended": (
+        "post",
+        f"/api/apptimer/homes/{HOME}/scene/type/K/300011",
+        lambda api: api.run_recommended_scene(HOME, "K", 300011, UPDATE_TIME, open_flg="1"),
+    ),
+    "run_once": (
+        "post",
+        f"/api/apptimer/homes/{HOME}/scene/type/G/300010",
+        lambda api: api.run_recommended_scene(HOME, "G", 300010, UPDATE_TIME),
+    ),
+    "auto": (
+        "put",
+        f"/api/apptimer/homes/{HOME}/newScenes/300013/flag/0",
+        lambda api: api.set_auto_scene(HOME, 300013, "B", "1", UPDATE_TIME),
+    ),
+    "replay": (
+        "post",
+        "/api/appcontrol/cmds/multiIuOuCtrl",
+        lambda api: api.run_scene(HOME, "YO438", [], []),
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "message"),
+    [
+        (403, {}, "HTTP 403"),
+        (200, {"code": "403", "message": "无权限"}, "无权限"),
+        (200, {"code": 403}, "code 403"),
+    ],
+)
+@pytest.mark.parametrize("action", SCENE_ACTIONS)
+async def test_scene_action_403_is_a_rejection(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, status, body, message, action
+) -> None:
+    """A 403 on a scene change or run refuses the action, not the session.
+
+    The action has just read the home's scene list with the same token
+    (YorkCoordinator._prepare_scene): never a new login, which would log
+    the phone app out and then ask to log in again although the
+    credentials are fine.
+    """
+    method, path, call = SCENE_ACTIONS[action]
+    getattr(aioclient_mock, method)(
+        f"{API_BASE}{path}", side_effect=lambda *a, **k: _resp(body, status)
+    )
+    aioclient_mock.get(LOGIN_URL, json=_login_body("fresh"))
+    api = _api(hass, password="pw", auth=Session("tok", 200002))
+    with pytest.raises(YorkCommandError) as info:
+        await call(api)
+    assert str(info.value) == message  # the server's text, never the path
+    assert not isinstance(info.value, YorkSceneConflictError)
+    assert aioclient_mock.call_count == 1  # no login
+    assert api.auth.token == "tok"
+
+
+async def test_scene_action_403_after_reclaim(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker
+) -> None:
+    """Taken back from the app for the action (401), then refused: one login only."""
+    path = f"/api/apptimer/homes/{HOME}/smarts/{SLEEP_ID}/openFlg"
+    aioclient_mock.put(
+        f"{API_BASE}{path}",
+        side_effect=_sequence(UNAUTHORIZED, {"code": "403", "message": "无权限"}),
+    )
+    aioclient_mock.get(LOGIN_URL, json=_login_body("fresh"))
+    api = _api(hass, password="pw", auth=Session("old", 200002))
+    with pytest.raises(YorkCommandError, match="^无权限$"):
+        await api.set_scene_open(HOME, SLEEP_ID, "1", UPDATE_TIME)
+    assert api.auth.token == "fresh"
+    assert [call[1].path for call in aioclient_mock.mock_calls] == [path, "/login", path]
 
 
 # ================================================================== entities
@@ -1113,6 +1224,175 @@ async def test_toggle_keeps_list_read_meanwhile(
     assert scene.record["smartName"] == "改名"
     assert scene.record["updateTime"] == 1700000000777
     assert scene.record["openFlg"] == "1"
+
+
+def _held_poll_reads(mock_api, cloud: _Cloud) -> tuple[asyncio.Event, asyncio.Event]:
+    """Hold the answers of the status polls' scene list reads.
+
+    The cloud answers when asked (the answer is taken then); it is
+    delivered once the returned ``deliver`` event is set. ``out`` is set
+    when such a read is under way. A scene action's own read (reclaim)
+    is answered right away.
+    """
+    out, deliver = asyncio.Event(), asyncio.Event()
+
+    async def read(home, **kwargs):
+        answer = cloud.read(home)
+        if not kwargs.get("reclaim"):
+            out.set()
+            await deliver.wait()
+        return answer
+
+    mock_api.get_scenes.side_effect = read
+    return out, deliver
+
+
+async def test_list_read_answered_before_change_is_dropped(
+    hass: HomeAssistant, mock_api, config_entry
+) -> None:
+    """A poll's list read answered before a change but delivered after it.
+
+    The answer predates the change: it is dropped instead of showing the
+    scene off again, and the lists are read again at the next poll (that
+    read does not count as the one the change asked for).
+    """
+    timer = _scene(300004, "O")
+    cloud = _Cloud(mock_api, [timer])
+    await _setup(hass, config_entry)
+    coordinator = config_entry.runtime_data
+    entity_id = _entity(hass, SWITCH_DOMAIN, 300004)
+    out, deliver = _held_poll_reads(mock_api, cloud)
+    coordinator._last_scene_fetch = None  # due at the next poll
+    with _no_refresh(config_entry):
+        poll = hass.async_create_task(coordinator.async_refresh())
+        await out.wait()  # the cloud has answered: off
+        await _switch(hass, entity_id, True)
+        assert timer["openFlg"] == "1"  # the cloud took the change
+        assert hass.states.get(entity_id).state == "on"
+        deliver.set()
+        await poll
+        assert coordinator.last_update_success
+        assert hass.states.get(entity_id).state == "on"  # not the older answer
+        assert coordinator.homes[HOME].scenes["300004"].record["openFlg"] == "1"
+        reads = mock_api.get_scenes.await_count
+        await coordinator.async_refresh()
+    assert mock_api.get_scenes.await_count == reads + 1  # read again
+    assert hass.states.get(entity_id).state == "on"
+    # Then the slow cadence again.
+    await coordinator.async_refresh()
+    assert mock_api.get_scenes.await_count == reads + 1
+
+
+async def test_list_read_older_than_action_read_is_dropped(
+    hass: HomeAssistant, mock_api, config_entry
+) -> None:
+    """A poll's read sent before an action's own read, delivered while its change is out.
+
+    The action decided on its newer read (here the scene was renamed in
+    the app meanwhile): the older answer does not replace it.
+    """
+    timer = _scene(300004, "O")
+    cloud = _Cloud(mock_api, [timer])
+    await _setup(hass, config_entry)
+    coordinator = config_entry.runtime_data
+    entity_id = _entity(hass, SWITCH_DOMAIN, 300004)
+    out, deliver = _held_poll_reads(mock_api, cloud)
+    coordinator._last_scene_fetch = None
+    poll = hass.async_create_task(coordinator.async_refresh())
+    await out.wait()
+    cloud.edit(300004, smartName="改名")  # renamed in the app
+
+    async def change(*args):
+        deliver.set()
+        await poll  # the poll's answer arrives while the change is out
+        return cloud.set_open(*args)
+
+    mock_api.set_scene_open.side_effect = change
+    with _no_refresh(config_entry):
+        await _switch(hass, entity_id, True)
+    assert poll.done()
+    state = hass.states.get(entity_id)
+    assert state.state == "on"
+    assert state.attributes["friendly_name"].endswith("改名")
+    assert coordinator.homes[HOME].scenes["300004"].record["updateTime"] == timer["updateTime"]
+
+
+async def test_list_read_of_other_home_kept(hass: HomeAssistant, mock_api, config_entry) -> None:
+    """An action drops only its own home's answer; every list is read again after it."""
+    second = copy.deepcopy(FIXTURE["device"])
+    second.update(xkqCode="0000000000000002", homeId=100004, homeName="别墅")
+    mock_api.get_wire_controllers.return_value = [copy.deepcopy(FIXTURE["device"]), second]
+    mock_api.get_status.side_effect = lambda home, codes: {
+        c: copy.deepcopy(FIXTURE["status"]) for c, _ in codes
+    }
+    mock_api.get_online.return_value = {CODE: True, "0000000000000002": True}
+    timer = _scene(300004, "O")
+    villa = _Cloud(mock_api, [_scene(300005, "8", homeId=100004)])
+    cloud = _Cloud(mock_api, [timer])  # (last: the changes go to this one)
+    homes = {HOME: cloud, 100004: villa}
+    out, deliver = asyncio.Event(), asyncio.Event()
+    hold = False
+
+    async def read(home, **kwargs):
+        answer = homes[home].read(home)
+        if hold and home == 100004:
+            out.set()
+            await deliver.wait()
+        return answer
+
+    mock_api.get_scenes.side_effect = read
+    await _setup(hass, config_entry)
+    coordinator = config_entry.runtime_data
+    switch_id = _entity(hass, SWITCH_DOMAIN, 300004)
+    button_id = _entity(hass, BUTTON_DOMAIN, 300005, home=100004)
+    villa.edit(300005, smartName="改名")  # renamed in the app
+    hold = True
+    coordinator._last_scene_fetch = None
+    with _no_refresh(config_entry):
+        poll = hass.async_create_task(coordinator.async_refresh())
+        await out.wait()  # the first home is read, the second one is under way
+        await _switch(hass, switch_id, True)
+        deliver.set()
+        await poll
+        assert hass.states.get(switch_id).state == "on"
+        # The other home's answer is not older than anything: taken.
+        assert hass.states.get(button_id).attributes["friendly_name"].endswith("改名")
+        reads = len(mock_api.get_scenes.await_args_list)
+        await coordinator.async_refresh()
+    assert [c.args[0] for c in mock_api.get_scenes.await_args_list[reads:]] == [HOME, 100004]
+    assert hass.states.get(switch_id).state == "on"
+
+
+async def test_second_change_during_refresh_of_first(
+    hass: HomeAssistant, mock_api, config_entry
+) -> None:
+    """Two scenes switched in a row: the second lands on the read the first's refresh started.
+
+    That read predates the second change: dropped, and the next poll reads
+    the list again, although the refresh the second change asks for is
+    swallowed by the one under way (Home Assistant's debouncer).
+    """
+    first, second = _scene(300004, "O"), _scene(300005, "O")
+    cloud = _Cloud(mock_api, [first, second])
+    await _setup(hass, config_entry)
+    first_id = _entity(hass, SWITCH_DOMAIN, 300004)
+    second_id = _entity(hass, SWITCH_DOMAIN, 300005)
+    out, deliver = _held_poll_reads(mock_api, cloud)
+    await _switch(hass, first_id, True)
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=1))
+    await asyncio.wait_for(out.wait(), 10)  # the refresh after it reads the list
+    await _switch(hass, second_id, True)
+    assert second["openFlg"] == "1"
+    reads = mock_api.get_scenes.await_count
+    deliver.set()
+    await hass.async_block_till_done()
+    assert hass.states.get(first_id).state == "on"
+    assert hass.states.get(second_id).state == "on"
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=2.1))
+    await hass.async_block_till_done()
+    assert mock_api.get_scenes.await_count == reads + 1  # read again, once
+    assert hass.states.get(first_id).state == "on"
+    assert hass.states.get(second_id).state == "on"
 
 
 async def test_switch_scene_rejected(hass: HomeAssistant, mock_api, config_entry) -> None:
@@ -1521,6 +1801,63 @@ async def test_run_scene_errors_map_like_commands(
         await coordinator.async_run_scene(HOME, "300004")
     assert info.value.translation_key == "client_outdated"
     assert coordinator.client_outdated
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "message"),
+    [(403, {}, "HTTP 403"), (200, {"code": "403", "message": "无权限"}, "无权限")],
+)
+@pytest.mark.parametrize("action", ["switch", "run"])
+async def test_scene_action_403_rejected(
+    hass: HomeAssistant,
+    mock_api,
+    config_entry,
+    aioclient_mock: AiohttpClientMocker,
+    status,
+    body,
+    message,
+    action,
+) -> None:
+    """A 403 on the change or run (through the real client): rejected, no login, no reauth.
+
+    Reading the list right before worked with the same token, so the
+    credentials are fine: the cloud refused this action.
+    """
+    api = _api(hass, password="pw", auth=Session("tok", 200002))
+    records = [_scene(300004, "O"), _scene(300006, "8")]
+    detail = {**SCENE_FLAGS, "smartList": records}
+    aioclient_mock.get(DETAIL_URL, json={**OK, "data": {"homeDetail": detail}})
+    url = (
+        f"{API_BASE}/api/apptimer/homes/{HOME}/smarts/300004/openFlg"
+        if action == "switch"
+        else CTRL_URL
+    )
+    getattr(aioclient_mock, "put" if action == "switch" else "post")(
+        url, side_effect=lambda *a, **k: _resp(body, status)
+    )
+    aioclient_mock.get(LOGIN_URL, json=_login_body("fresh"))
+    mock_api.get_scenes.side_effect = api.get_scenes
+    mock_api.set_scene_open.side_effect = api.set_scene_open
+    mock_api.run_scene.side_effect = api.run_scene
+    await _setup(hass, config_entry)
+    coordinator = config_entry.runtime_data
+    with pytest.raises(HomeAssistantError) as info:
+        if action == "switch":
+            await _switch(hass, _entity(hass, SWITCH_DOMAIN, 300004), True)
+        else:
+            await _press(hass, _entity(hass, BUTTON_DOMAIN, 300006))
+    name = "场景O" if action == "switch" else "场景8"
+    assert info.value.translation_key == "scene_rejected"
+    assert info.value.translation_placeholders == {"scene": name, "message": message}
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert not _reauth_started(hass)
+    mock_api.relogin.assert_not_called()
+    assert api.auth.token == "tok"
+    assert "/login" not in {call[1].path for call in aioclient_mock.mock_calls}
+    assert not coordinator.session_yielded
+    assert coordinator.last_update_success
+    assert hass.states.get(_entity(hass, SWITCH_DOMAIN, 300004)).state == "off"
+    mock_api.get_control_results.assert_not_called()
 
 
 async def test_run_once_scene(hass: HomeAssistant, mock_api, config_entry) -> None:
@@ -1954,7 +2291,7 @@ async def test_scene_fetch_client_outdated(hass: HomeAssistant, mock_api, config
 
 
 async def test_scene_cadence(hass: HomeAssistant, mock_api, config_entry) -> None:
-    """The scene list is read on its own slow timer, while the 2 s polling runs."""
+    """The scene list is read every SCENE_INTERVAL in a status poll, not in every 2 s poll."""
     await _setup(hass, config_entry)
     assert mock_api.get_scenes.await_count == 1  # at setup
     status_calls = mock_api.get_status.await_count
@@ -1988,7 +2325,7 @@ async def test_scene_action_triggers_read(hass: HomeAssistant, mock_api, config_
     await _after_action(hass)
     assert mock_api.get_scenes.await_count == reads + 2  # and the one after it
     assert mock_api.get_status.await_count == status_calls + 1  # status refresh too
-    # Then the slow timer again.
+    # Then the slow cadence again.
     await _after_action(hass)
     assert mock_api.get_scenes.await_count == reads + 2
 
@@ -2057,7 +2394,7 @@ async def test_new_home_read_at_once(hass: HomeAssistant, mock_api, config_entry
     assert hass.states.get(button_id).state == "unknown"
     device = dr.async_get(hass).async_get(er.async_get(hass).async_get(button_id).device_id)
     assert device.name == "别墅 York Smart Home"
-    # Then back to the slow timer.
+    # Then back to the slow cadence.
     await coordinator.async_refresh()
     assert mock_api.get_scenes.await_count == 3
 

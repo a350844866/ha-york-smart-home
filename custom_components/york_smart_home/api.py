@@ -101,10 +101,19 @@ class YorkForbiddenError(YorkAuthError):
     """HTTP 403 / code 403.
 
     Renewed like any rejected session, except on an optional read
-    (``_authed(optional=True)``), where it is raised as YorkApiError: the
-    app itself has no 403 handling at all (handleResponse only knows
-    LOGIN_ELSEWHERE and code 300).
+    (``_authed(optional=True)``), where it is raised as YorkApiError, and on
+    a scene change or run (``_authed(forbidden_is_rejection=True)``), where
+    it is a YorkCommandError. The app itself has no 403 handling at all
+    (main chunk, HttpRequest): handleResponse only reacts to code "300",
+    handleError only to no network, a timeout and HTTP 401 (LOGIN_ELSEWHERE),
+    and its response code enum has no 403.
     """
+
+    def __init__(self, text: str, message: str) -> None:
+        super().__init__(text)
+        # Shown when the 403 rejects a command: the server's message of a
+        # code "403" answer, else "HTTP 403" / "code 403" (never the path).
+        self.message = message
 
 
 class YorkClientOutdatedError(YorkError):
@@ -267,7 +276,7 @@ class YorkApi:
                 if resp.status == 401:
                     raise YorkSessionTakenError(f"{path}: HTTP 401")
                 if resp.status == 403:
-                    raise YorkForbiddenError(f"{path}: HTTP 403")
+                    raise YorkForbiddenError(f"{path}: HTTP 403", "HTTP 403")
                 if resp.status == 429:
                     retry = resp.headers.get("Retry-After", "")
                     raise YorkRateLimitError(
@@ -292,7 +301,7 @@ class YorkApi:
             # The app only checks the HTTP status for this; treated alike to be safe.
             raise YorkSessionTakenError(f"{path}: code 401")
         if body["code"] == "403":
-            raise YorkForbiddenError(f"{path}: code 403")
+            raise YorkForbiddenError(f"{path}: code 403", str(body.get("message") or "code 403"))
         if body["code"] == "300":
             # handleResponse's only special code: force an app update.
             data = body.get("data") if isinstance(body.get("data"), dict) else {}
@@ -318,19 +327,29 @@ class YorkApi:
         envelope: bool = False,
         reclaim: bool = False,
         optional: bool = False,
+        forbidden_is_rejection: bool = False,
     ) -> Any:
         """Authenticated request; renews the session once if it was rejected.
 
         A session taken by another device (401) is only renewed when
-        ``reclaim`` (an explicit user action) or ``reclaim_session`` is set;
-        otherwise YorkSessionTakenError is raised so the caller can leave the
-        session to that device, as the app does.
+        ``reclaim`` (an explicit user action) or ``reclaim_session`` (the
+        "always reclaim" option) is set; otherwise YorkSessionTakenError is
+        raised so the caller can leave the session to that device, as the
+        app does. That holds for every request, the optional reads too: with
+        "always reclaim" on, they log in again like the status polling would.
+
+        A 403 renews the session too, except:
 
         ``optional``: a read beside the status polling (the scene list, a
-        scene run's result). A 403 there refuses that resource, not the
-        session (the status poll just worked with the same token), so it is
-        raised as YorkApiError without logging in again, which would log
-        the phone app out for nothing.
+        scene run's result, the firmware information). A 403 there refuses
+        that resource, not the session (the status poll works with the same
+        token), so it is raised as YorkApiError without logging in again,
+        which would log the phone app out for nothing.
+
+        ``forbidden_is_rejection``: a scene change or run. It is sent right
+        after the home's scene list was read with the same token, so a 403
+        refuses the action, not the session: raised as YorkCommandError
+        (with the server's message, if any) without logging in again.
         """
         if self.auth is None:
             await self._renew(None)
@@ -347,8 +366,12 @@ class YorkApi:
                 # a renewal; automatic reclaiming stops on ping-pong.
                 await self._renew(used, guard=not reclaim)
             except YorkAuthError as err:
-                if optional and isinstance(err, YorkForbiddenError):
-                    raise YorkApiError(str(err)) from None
+                if isinstance(err, YorkForbiddenError):
+                    if optional:
+                        raise YorkApiError(str(err)) from None
+                    if forbidden_is_rejection:
+                        _LOGGER.debug("%s refused the request: %s", path, err.message)
+                        raise YorkCommandError(err.message) from None
                 if attempt == 2:
                     raise
                 _LOGGER.debug("Session rejected on %s, renewing", path)
@@ -685,9 +708,10 @@ class YorkApi:
         rest of the detail (address, position, phone number, devices).
 
         A missing list means no scenes; records without a smartId cannot be
-        addressed and are skipped. An optional read: a 403 is YorkApiError.
-        ``reclaim``: part of a user action, which takes a session left to
-        another device back (like control()).
+        addressed and are skipped. An optional read: a 403 is YorkApiError,
+        never a login. ``reclaim``: part of a user action, which takes a
+        session left to another device back (like control()); otherwise a
+        401 logs in again only with "always reclaim" (``reclaim_session``).
         """
         data = await self._authed(
             "GET", f"/api/apphome/homes/{home_id}", reclaim=reclaim, optional=True
@@ -726,8 +750,10 @@ class YorkApi:
         shows the message of any other code.
 
         A user action, so a session taken by another device is logged in
-        again right away. Returns the answer's data unchanged: the tokens the
-        scenes tab passes to multiCtrlResult.
+        again right away. A 403 rejects the run (YorkCommandError), never a
+        login: the home's scene list was just read with the same token
+        (``forbidden_is_rejection``). Returns the answer's data unchanged:
+        the tokens the scenes tab passes to multiCtrlResult.
         """
         body: dict[str, Any] = {
             "regionCode": "000000",
@@ -745,7 +771,12 @@ class YorkApi:
             body["sceneId"] = scene_id
         _LOGGER.debug("Run scene: %s", body)
         answer = await self._authed(
-            "POST", "/api/appcontrol/cmds/multiIuOuCtrl", json=body, envelope=True, reclaim=True
+            "POST",
+            "/api/appcontrol/cmds/multiIuOuCtrl",
+            json=body,
+            envelope=True,
+            reclaim=True,
+            forbidden_is_rejection=True,
         )
         _LOGGER.debug("Run scene answered: %s", answer)
         if answer["code"] != "200":
@@ -758,8 +789,9 @@ class YorkApi:
 
         Body ``{"tokenList": <the run's data>}``; returns the envelope, whose
         code tells how the run went (scenes.result_outcome). A background
-        check, not a user action: it never logs in (a 401 is raised, a 403
-        is YorkApiError).
+        check, not a user action: a 403 is YorkApiError, never a login, and
+        a 401 is raised (YorkSessionTakenError) unless "always reclaim"
+        (``reclaim_session``) is on, which logs in again as for any request.
         """
         return await self._authed(
             "POST",
@@ -858,14 +890,18 @@ class YorkApi:
         """A scene change; an explicit user action like control().
 
         "200" is success; "223" a conflict with another scene; any other code
-        a rejection with the server's message (the app shows it). An unknown
+        a rejection with the server's message (the app shows it). A 403 is a
+        rejection too, never a login: the home's scene list was just read
+        with the same token (``forbidden_is_rejection``). An unknown
         updateTime (None) is left out: for a record without one the app
         copies an undefined field, which JSON.stringify drops.
         """
         if body.get("updateTime") is None:
             body = {key: value for key, value in body.items() if key != "updateTime"}
         _LOGGER.debug("Scene %s %s: %s", method, path, body)
-        answer = await self._authed(method, path, json=body, envelope=True, reclaim=True)
+        answer = await self._authed(
+            method, path, json=body, envelope=True, reclaim=True, forbidden_is_rejection=True
+        )
         _LOGGER.debug("Scene %s %s answered: %s", method, path, answer)
         message = str(answer.get("message") or f"code {answer['code']}")
         if answer["code"] == "223":
@@ -891,7 +927,8 @@ class YorkApi:
         with a homeList is an error (the app then shows nothing).
 
         A background read like the scene list: optional (a 403 is
-        YorkApiError, never a login).
+        YorkApiError, never a login), and a 401 logs in again only with
+        "always reclaim" (``reclaim_session``).
         """
         data = await self._authed(
             "POST", "/api/appdevice/getOtas", json={"homeIdList": home_ids}, optional=True
