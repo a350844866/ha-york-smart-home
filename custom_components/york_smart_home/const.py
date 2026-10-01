@@ -426,3 +426,19 @@ STANDARD_STATUS_BANNERS: Final = {
 }
 # Standard settings page (xkq-set): six levels (一档..六档) sent as 0..5.
 STANDARD_BRIGHTNESS_LEVELS: Final = 6
+
+# ---------------------------------------------------------------------------
+# Batch 6a: cloud scenes (智能场景) of the app's scenes tab (see scenes.py).
+# ---------------------------------------------------------------------------
+
+# Read the scene list of every home this often, plus right after setup, when
+# a home appears, when the session comes back and after any scene action.
+# The app reads it each time the scenes tab opens; scenes change rarely, and
+# the cloud runs them on its own, so the 2 s status loop never asks for them.
+SCENE_INTERVAL: Final = 600
+# After running a scene the scenes tab polls multiCtrlResult (getControlResults)
+# every ctrlRefTime and gives up after ctrlTimeOut. The app never copies
+# those two from the login answer, so its defaults apply: 2 s and 20 s.
+SCENE_RESULT_INTERVAL: Final = 2
+SCENE_RESULT_TIMEOUT: Final = 20
+SCENE_RESULT_POLLS: Final = SCENE_RESULT_TIMEOUT // SCENE_RESULT_INTERVAL

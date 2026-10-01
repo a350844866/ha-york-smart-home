@@ -57,8 +57,9 @@ from .const import (
     TEMP_LIMIT_HEAT,
     TIMER_KEYS,
 )
-from .coordinator import YorkConfigEntry
+from .coordinator import YorkConfigEntry, YorkScene
 from .profile import FUNC_KEYS
+from .scenes import RUN
 
 _INFO_KEYS = (
     "type",
@@ -151,6 +152,40 @@ def _filter(values: dict[str, Any], patterns: re.Pattern[str]) -> dict[str, Any]
     }
 
 
+def _entries(value: Any) -> list[dict[str, Any]]:
+    return [entry for entry in value if isinstance(entry, dict)] if isinstance(value, list) else []
+
+
+def _scene(scene: YorkScene) -> dict[str, Any]:
+    """A cloud scene without its name, ids, schedule or tokens.
+
+    Wire controllers by type with their stored command (allowlisted status
+    keys only); gateway indoor units are only counted.
+    """
+    record = scene.record
+    stype = scene.stype
+    entity = None if stype is None else "button" if stype.control == RUN else "switch"
+    return {
+        "type": record.get("type"),
+        "entity": entity,
+        "present": scene.present,
+        "openFlg": record.get("openFlg"),
+        "actionFlg": record.get("actionFlg"),
+        "favoriteFlg": record.get("favoriteFlg"),
+        "wire_controllers": [
+            {
+                "xkqType": entry.get("xkqType"),
+                "deviceType": entry.get("deviceType"),
+                "ctrlJson": _filter(entry["ctrlJson"], _STATUS_PATTERNS)
+                if isinstance(entry.get("ctrlJson"), dict)
+                else None,
+            }
+            for entry in _entries(record.get("xkqList"))
+        ],
+        "indoor_unit_count": len(_entries(record.get("iuList"))),
+    }
+
+
 async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: YorkConfigEntry
 ) -> dict[str, Any]:
@@ -173,5 +208,17 @@ async def async_get_config_entry_diagnostics(
                 "constants": _filter(dev.constants, _CONSTANT_PATTERNS),
             }
             for index, dev in enumerate(coordinator.devices.values(), start=1)
+        ],
+        # Cloud scenes per home (homes by index, no ids or names). Only
+        # whether the last read failed: the error names the home in its URL.
+        "scene_read_failed": coordinator.scene_error is not None,
+        "homes": [
+            {
+                "home": index,
+                "present": home.present,
+                "scenes_loaded": home.loaded,
+                "scenes": [_scene(scene) for scene in home.scenes.values()],
+            }
+            for index, home in enumerate(coordinator.homes.values(), start=1)
         ],
     }

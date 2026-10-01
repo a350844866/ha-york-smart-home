@@ -71,6 +71,11 @@
       }
     }
   },
+  "device": {
+    "home": {
+      "name": "{home} 约克智慧家"
+    }
+  },
   "entity": {
     "climate": {
       "york": {
@@ -219,6 +224,39 @@
     "button": {
       "filter_reset": {
         "name": "滤网复位"
+      },
+      "scene": {
+        "name": "场景",
+        "state_attributes": {
+          "scene_type": {
+            "name": "场景类型",
+            "state": {
+              "leave_home": "离家",
+              "go_home": "回家",
+              "sleep_curve": "睡眠曲线",
+              "leave_home_energy_saving": "离家节能",
+              "night_mute": "夜间静音",
+              "manual": "手动场景",
+              "timer_legacy": "定时场景（旧版）",
+              "summer": "夏季防暑热",
+              "winter": "冬季防过冷",
+              "dehumidify": "除湿智能场景",
+              "purify": "净化智能场景",
+              "ai_fast_heat": "Ai水氟速热",
+              "advance_heating": "提前暖房",
+              "pets": "宠物场景",
+              "party": "聚会场景",
+              "motion": "运动场景",
+              "vacation": "度假场景",
+              "smart_dehumidify": "两联供智慧除湿",
+              "hot_water_timer": "热水定时",
+              "timer": "定时场景"
+            }
+          },
+          "devices": {
+            "name": "设备数"
+          }
+        }
       }
     },
     "switch": {
@@ -272,6 +310,47 @@
       },
       "independent_human_sense": {
         "name": "人感"
+      },
+      "scene": {
+        "name": "场景",
+        "state_attributes": {
+          "scene_type": {
+            "name": "场景类型",
+            "state": {
+              "leave_home": "离家",
+              "go_home": "回家",
+              "sleep_curve": "睡眠曲线",
+              "leave_home_energy_saving": "离家节能",
+              "night_mute": "夜间静音",
+              "manual": "手动场景",
+              "timer_legacy": "定时场景（旧版）",
+              "summer": "夏季防暑热",
+              "winter": "冬季防过冷",
+              "dehumidify": "除湿智能场景",
+              "purify": "净化智能场景",
+              "ai_fast_heat": "Ai水氟速热",
+              "advance_heating": "提前暖房",
+              "pets": "宠物场景",
+              "party": "聚会场景",
+              "motion": "运动场景",
+              "vacation": "度假场景",
+              "smart_dehumidify": "两联供智慧除湿",
+              "hot_water_timer": "热水定时",
+              "timer": "定时场景"
+            }
+          },
+          "devices": {
+            "name": "设备数"
+          },
+          "status": {
+            "name": "状态",
+            "state": {
+              "on": "开",
+              "off": "关",
+              "hangup": "挂起"
+            }
+          }
+        }
       }
     },
     "number": {
@@ -466,6 +545,18 @@
     },
     "swing_not_available": {
       "message": "只有开机且不在地暖模式时才能调节风向（导风板）。"
+    },
+    "scene_gone": {
+      "message": "该场景已不在约克智慧家 App 中。"
+    },
+    "scene_no_devices": {
+      "message": "场景「{scene}」中还没有空调，请先在约克智慧家 App 中编辑该场景并添加空调。"
+    },
+    "scene_conflict": {
+      "message": "场景「{scene}」与其他场景冲突，未修改（{message}）。Home Assistant 不会为此关闭其他场景，请在约克智慧家 App 中处理。"
+    },
+    "scene_rejected": {
+      "message": "约克云拒绝了场景「{scene}」：{message}"
     }
   },
   "issues": {

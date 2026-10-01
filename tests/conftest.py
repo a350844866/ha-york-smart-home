@@ -22,6 +22,10 @@ from homeassistant.const import CONF_PASSWORD
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "device.json").read_text("utf-8"))
 CODE = FIXTURE["device"]["xkqCode"]
 PHONE = "13800000000"
+# The account's cloud scenes: one sleep curve scene, off and without devices.
+SCENES = json.loads((Path(__file__).parent / "fixtures" / "scenes.json").read_text("utf-8"))[
+    "smartList"
+]
 
 
 @pytest.fixture(autouse=True)
@@ -70,6 +74,14 @@ def mock_api():
         api.control = AsyncMock(return_value=None)
         api.set_simple_timer = AsyncMock(return_value={})
         api.cancel_simple_timer = AsyncMock(return_value={})
+        api.get_scenes = AsyncMock(side_effect=lambda home: copy.deepcopy(SCENES))
+        api.run_scene = AsyncMock(return_value=[{"iezCode": CODE, "hiiotToken": "h1"}])
+        api.get_control_results = AsyncMock(
+            return_value={"code": "200", "message": "控制成功", "data": []}
+        )
+        api.set_scene_open = AsyncMock(return_value={"updateTime": 1700000000009})
+        api.run_recommended_scene = AsyncMock(return_value={"updateTime": 1700000000009})
+        api.set_auto_scene = AsyncMock(return_value={"updateTime": 1700000000009})
         api.unsupported_count = 0
         api.reclaim_session = False
         yield api

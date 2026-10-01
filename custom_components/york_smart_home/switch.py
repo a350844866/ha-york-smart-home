@@ -10,6 +10,8 @@
   colour controller, four on the standard one), so each switch sends that
   bundle with only its own value changed (control.build_settings /
   build_standard_settings).
+* Cloud scenes (智能场景) with an on/off toggle in the app (sleep curve,
+  timers, vacation, linkage scenes ...): the cloud runs them while on.
 """
 
 from __future__ import annotations
@@ -42,8 +44,14 @@ from .control import (
     k3_settings,
 )
 from .coordinator import YorkConfigEntry
-from .entity import YorkEntity, async_add_device_entities
+from .entity import (
+    YorkEntity,
+    YorkSceneEntity,
+    async_add_device_entities,
+    async_add_scene_entities,
+)
 from .profile import SWITCH_FUNCS, func_active, func_enabled, func_offered
+from .scenes import SWITCH, scene_is_on, scene_status
 
 PARALLEL_UPDATES = 0  # the coordinator serializes commands per controller
 
@@ -132,6 +140,41 @@ async def async_setup_entry(
         return entities
 
     async_add_device_entities(entry, async_add_entities, create, wait_for_status=True)
+    async_add_scene_entities(
+        entry,
+        async_add_entities,
+        lambda coordinator, scene: (
+            [YorkSceneSwitch(coordinator, scene)]
+            if scene.stype is not None and scene.stype.control == SWITCH
+            else []
+        ),
+    )
+
+
+class YorkSceneSwitch(YorkSceneEntity, SwitchEntity):
+    """A cloud scene the app switches on and off; the cloud runs it while on.
+
+    On as the app's toggle shows it (scenes.scene_is_on); attribute
+    ``status`` is the raw state, including "hangup" (HANGUP, "2").
+    """
+
+    @property
+    def is_on(self) -> bool | None:
+        scene = self.scene
+        return scene_is_on(scene.record, self.stype) if scene is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        attributes = super().extra_state_attributes
+        if attributes is None or (scene := self.scene) is None:
+            return attributes
+        return {**attributes, "status": scene_status(scene.record, self.stype)}
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_scene(self._home_id, self._smart_id, True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self.coordinator.async_set_scene(self._home_id, self._smart_id, False)
 
 
 class YorkFunctionSwitch(YorkEntity, SwitchEntity):

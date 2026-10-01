@@ -8,6 +8,8 @@
 
 ## 功能
 
+每个家庭另有一个「<家庭名> 约克智慧家」设备，包含 App 里的智能场景（见下文「智能场景」）。
+
 每个线控器会生成一个设备，包含：
 
 | 实体 | 说明 |
@@ -124,7 +126,37 @@
     - App 在任何功能变动时都会把「没选中」的人感重置为 0，即使设备没有这个功能；HA 只对提供该功能的设备这样做，不会给没有人感的设备发人感字段。
   - **新风型彩屏线控器**（能力位 `saveene_freshair="1"`，App 的 xkqColorType WIND）：没有设定温度和湿度；`sensor` 室内湿度（%）、室内 PM2.5（μg/m³）、室内 CO₂（ppm）、室内 TVOC（等级，0 优 / 1 良 / ≥2 差，无单位）在线控器上报了该字段时创建，数值不合理时（湿度 1~100%、PM2.5 0~1000、CO₂ 1~10000、TVOC 0~10 以外，例如传感器预热时 CO₂ 报 0）显示「未知」，数值恢复正常后自动显示（传感器不会因为 HA 启动时数值不合理而缺失），和 App 一样关机时显示「未知」（App 显示「--」）；`climate` 的当前湿度也取室内湿度。滤网提醒的属性 `filters` 列出 5 个滤网（初效、加湿、活性炭、新风侧 PM2.5、回风侧 PM2.5）各自是 `ok`、`clean`（需清洁）还是 `replace`（需更换），与 App 的滤网弹窗一致。
 - 所有报错（离线、升级中、系统冷却中、锁定、功能当前不能切换、控制失败等）都有中英文翻译。
-- 支持下载诊断信息。诊断用白名单导出，只包含协议类型、固件版本、能力位和空调状态（包括状态提示、运行状态、故障槽位和定时的字段），不含手机号、密码、token、设备编号、名称和位置。
+- 支持下载诊断信息。诊断用白名单导出，只包含协议类型、固件版本、能力位和空调状态（包括状态提示、运行状态、故障槽位和定时的字段），以及每个场景的类型、开关状态和设备数（线控器只带类型和白名单内的指令字段），不含手机号、密码、token、设备编号、家庭和场景的编号与名称、位置。
+
+## 智能场景（App 里的云端场景）
+
+App「场景」页上的场景也会接入 HA，放在家庭设备「<家庭名> 约克智慧家」下（HA 为英文时是「<家庭名> York Smart Home」）。实体名就是场景在 App 里的名字，在 App 里改名后实体名称跟着变，实体 ID 不变。哪种场景生成什么实体，完全按 App 场景页给它的控件：
+
+| 场景类型（`type`） | App 场景页 | HA 实体 | 请求 |
+| --- | --- | --- | --- |
+| 手动场景（8）、离家（1）、回家（2）、Ai水氟速热（F） | 执行按钮 | `button` | 和 App 一样在本地「重放」：把场景里保存的每台设备的指令原样经 `multiIuOuCtrl` 发出 |
+| 提前暖房（G）、聚会（I） | 执行按钮 | `button` | `POST …/scene/type/{type}/{sceneId}`，由云端执行一次 |
+| 睡眠曲线（5）、离家节能（6）、夜间静音（7）、定时（O）、旧版定时（9）、热水定时（M） | 开关 | `switch` | `PUT …/smarts/{smartId}/openFlg` |
+| 度假（K）、两联供智慧除湿（L）、运动（J） | 开关（运动场景在 App 里是执行按钮，实际是打开/关闭，执行中显示「（执行中）」） | `switch` | `POST …/scene/type/{type}/{sceneId}` |
+| 夏季防暑热（B）、冬季防过冷（C）、除湿（D）、净化（E）联动场景，宠物场景（H） | 开关 | `switch` | `PUT …/newScenes/{smartId}/flag/0`（`actionFlg`） |
+| 节能（3）、静音（4）、自动（A）、出水定时（N）、智慧场景（Z） | 不显示 | 不创建 | — |
+
+> ⚠️ **云端场景和定时在约克的服务器上运行，和 HA 的自动化互不相干。** App 里打开的定时（O）、睡眠曲线（5）、度假、联动等场景到点后由云端直接控制空调，HA 只是通过状态轮询看到结果。如果你已经用 HA 自动化代替了 App 的定时，请在 App 里（或用这里的开关）关掉对应的云端场景，否则两套日程会同时执行、互相覆盖。
+
+- **读取**：`GET /api/apptimer/homes/{homeId}/smarts` → `data.smartList`（App 场景页用的同一个接口）。不放进 2 秒一次的状态轮询，而是单独每 10 分钟读一次；另外在启动时、出现新家庭时、让出的登录重新拿回之后，以及每次在 HA 里执行或开关场景之后，都会马上重读。所以在 App 里新建的场景最迟 10 分钟后出现在 HA，在 App 里删除的场景会变成「不可用」（再出现时恢复）。只读取有本集成支持的线控器的家庭。
+- **读取失败**（超时、5xx、返回码不是 200 等）不影响空调的轮询：保留上一次的场景列表，日志里只警告一次（恢复后记一条 info），10 分钟后再试。账号在别处登录（401）、429 限流、要求升级 App（300）和状态轮询的处理完全一样。让出登录期间不访问任何场景接口。
+- **开关状态**和 App 显示的一致：`openFlg` 为 `"1"` 时为开；联动场景和宠物场景看 `actionFlg`，`"1"` 和 `"2"`（App 的 HANGUP，执行中/挂起）都算开（App 点一下会把这两种都关掉，宠物场景的开关也把两种都显示为开）。`openFlg` 为 `"2"` 时 App 的开关显示为关，HA 也显示为关。属性 `status` 是原始状态 `on` / `off` / `hangup`，`scene_type` 是场景类型，`devices` 是场景里的设备数（线控器加网关内机）。
+- **打开/关闭**：发送明确的 `"1"` / `"0"`（App 是把当前显示的状态取反），已经是目标状态时什么都不发。每次都带上场景的 `updateTime`（云端用它做乐观锁）：用缓存里最新的那个，成功后保存返回的 `data.updateTime`；之后不论成功失败都会重读场景列表，下一次就用列表里最新的值。
+  - 推荐场景（度假等）与其他场景冲突时云端返回 `223`，联动场景会返回冲突的场景列表（`hcScenes`）。App 会弹窗询问，确认后强制打开（`forceOpenFlg:"1"` / `flag:"1"`，会关掉另一个场景）；**HA 从不强制**，直接报错（带上云端的提示），请在 App 里处理。其他返回码同样报错并显示云端的提示。
+  - 和 App 一样，场景里没有设备时不能执行或打开（提示先在 App 里编辑场景并添加空调），什么都不发送；已经打开的场景可以关闭（App 首页允许）。
+- **执行（重放）**的请求体与 App 相同：`{"regionCode":"000000", "positionLng":0, "positionLat":0, "position1":"", "position2":"", "positionCity":"", "ctrlList":[…], "xkqCtrlList":[…], "homeId":…, "ctrlType":…}`。
+  - `xkqCtrlList` 是场景 `xkqList` 里每台线控器的 `{xkqCode, deviceType, xkqType, ctrlJson}`，`ctrlJson` 原样发送（场景里保存的是完整指令：开关机、模式、风速、温度、湿度）。网关内机按网关分组放进 `ctrlList`（与 App 场景页相同：`{iuCtrlInfo:[{systemNo, iuSn, iuNo, iuType, ctrlJson}], ouCtrlInfo:[], iezCode, deviceType}`，cat（E）/ZHP（6）内机的 `ctrlJson` 原样，其他网关只保留 onoff/mode/temp/wind/humi）。
+  - `ctrlType`：手动 `YO438`，离家 `YO431`，回家 `YO432`（与 App 首页的场景按钮相同；App 场景页对离家/回家也发 `YO438`），Ai水氟速热 `YO43F` 并带 `sceneId`。App 里没有「执行场景」的云端接口（`/cmds/sceneControl` 从未被调用）。
+  - 云端返回 `200` 按钮就算成功。之后和 App 场景页一样在后台每 2 秒查询一次执行结果（`multiCtrlResult`，请求体是执行返回的 `data`）：`200` 成功，`201/206/207/208/212/220` 失败（日志警告，带云端的提示），其他继续等；20 秒后仍没有结果时，只要有一台设备 `moduleResult` 为 `"2"` 就算成功，否则在日志里警告。App 在执行场景前不检查设备是否在线（离线的设备由云端报告失败），HA 也不检查。
+  - 执行后，刚在 HA 里调过的空调不再按 15 秒的宽限期显示旧指令的值，直接以线控器的上报为准；随后刷新一次状态。
+- **会话让给 App 期间**执行或开关场景：和控制指令一样先重新登录，再重读该家庭的场景列表（场景内容和 `updateTime` 可能已在 App 里改过），然后才发送。
+- App 还按家庭详情（`GET /api/apphome/homes/{homeId}`）里的功能开关决定显示哪些推荐场景：离家节能 `leaveEnergyFlg`、夜间静音 `nightQuiteFlg`（这两个是布尔值）、Ai水氟速热 `kszrFlg`、提前暖房~两联供智慧除湿 `sceneGFlg`~`sceneLFlg`；`scene2Flg`（离家/回家）、`scene5Flg`（睡眠曲线）在场景页只决定还没创建时是否显示占位（首页的收藏也按这些开关过滤）；`sceneMFlg` 决定是否提供热水定时（首页也只在它为 `"1"` 时显示热水定时）。`smartSceneFlg` 只用于 ZHP 网关自带的智慧场景，`smartFlg1`/`smartFlg2`/`sceneNFlg` App 没有用到。这些开关只决定 App 提供哪些模板，已经存在的场景不管开关如何都会在云端运行，所以 HA 显示所有已存在的场景，不读取家庭详情。
+- 作者账号里目前只有一个场景「睡眠」（睡眠曲线，关闭，场景里没有设备）：HA 里是一个关着的开关，打开会和 App 一样被拒绝，不发送任何请求。在 App 的睡眠场景里加入线控器后，打开它就等于在 App 里打开睡眠场景：云端每晚按曲线（默认 22:00~07:00，8 个点）自动调整设定温度，曲线开始时把风速设为低风。
 
 ## 安装
 
@@ -196,6 +228,12 @@ Authorization: Bearer <token>
 | 控制 | `POST /api/appcontrol/cmds/multiIuOuCtrl`，`ctrlType:"YO420"`，`xkqCtrlList[].ctrlJson` |
 | 控制结果 | `POST /api/appcontrol/cmds/multiCtrlResult` |
 | 定时 / 取消定时 | `POST /api/appdevice/homes/{homeId}/xkqs/{xkqCode}/simpleTimer`，`{"timerSimpleMinute":…, "ctrlJson":{…}}` → `data.timerSimpleTime` / `data.systemTime` |
+| 场景列表 | `GET /api/apptimer/homes/{homeId}/smarts` → `data.smartList[]`（`smartId`、`smartName`、`type`、`openFlg`、`actionFlg`、`updateTime`、`xkqList`、`iuList` …） |
+| 执行场景 | `POST /api/appcontrol/cmds/multiIuOuCtrl`，`ctrlType` `YO438` / `YO431` / `YO432` / `YO43F`，`xkqCtrlList` / `ctrlList` 取自场景 |
+| 场景执行结果 | `POST /api/appcontrol/cmds/multiCtrlResult`，`{"tokenList": <执行返回的 data>}` |
+| 打开/关闭场景 | `PUT /api/apptimer/homes/{homeId}/smarts/{smartId}/openFlg`，`{"openFlg":"1", "updateTime":…}` → `data.updateTime` |
+| 推荐场景 | `POST /api/apptimer/homes/{homeId}/scene/type/{type}/{sceneId}`，`{"homeId", "sceneId", "openFlg", "type", "updateTime", "forceOpenFlg":"0"}`（执行一次时不带 `openFlg` / `forceOpenFlg`）；`223` 表示冲突 |
+| 联动场景 | `PUT /api/apptimer/homes/{homeId}/newScenes/{smartId}/flag/0`，`{"hcScenes":[], "updateTime", "type", "actionFlg", "flag":"0", "homeId", "smartId"}`；返回里没有 `updateTime` 时 `hcScenes` 是冲突的场景 |
 
 `ctrlJson` 字段：
 
@@ -218,7 +256,7 @@ Authorization: Bearer <token>
 能力位（`constantJson`）里的 `*_fix` 等字段表示设备是否支持对应的模式或风速；注意部分模式的能力位不是 `_fix` 形式（`saveene_freshair`、`is_dehumidification2_avalable`、`is_dehumidification3_avalable`、`is_floor_heating_avalable`、`controllerFloorRmwetFix`、`air_supply_floor_heating`、`controllerFloorHeatFix`、`is_purification_available`、`is_heating_mode_available`）。
 账号在其他设备登录后接口返回 HTTP 401（App 只根据 HTTP 状态码判断 LOGIN_ELSEWHERE）；插件为保险起见，把响应体里的 `code:"401"` 也按同样方式处理；业务码 `code:"300"` 表示要求升级 App，`data.version` / `data.url` 是新版本号和下载地址。
 App 的线控器详情页只看控制接口返回的 `code`：`200` 表示成功，其他值会把 `message` 提示给用户。
-首页的快捷开关还会轮询 `multiCtrlResult`（`200` 完成，`205`/`400`/`500` 执行中，其他值失败），插件没有采用这一方式。
+首页的快捷开关和场景页的场景执行还会轮询 `multiCtrlResult`（`200` 完成，`201`/`206`/`207`/`208`/`212`/`220` 失败，其他值继续等，20 秒为止）；插件只在执行场景时这样做（见「智能场景」），控制指令仍和详情页一样只看返回码。
 
 状态查询：`xkqListGjy[].timestamp` 填上一次拿到的状态的 `roundTime`（App 首页的做法），有更新的上报才会返回；填 0 表示读取当前状态。上报的 `otaFlg` 为 `"1"` 时 App 下一轮填 0。
 
@@ -233,6 +271,7 @@ App 的线控器详情页只看控制接口返回的 `code`：`200` 表示成功
 - 短信登录的 refreshToken 续期与 App 的自动登录调用方式相同，但还没在真实账号上验证过。
 - 模式切换、扩展模式（地暖、净化等）、详情接口的 `constantJson` 格式还没在真机上完全验证过。字段来自 App 代码，不是抓包。
 - 定时的请求格式来自 App 代码，还没在真机上抓包验证；`timerSimpleTime` 是毫秒时间戳是从 App 的用法推断的，定时进行中 `simple_timer_time` 上报什么、`255` 是否表示「没有定时」也还没确认。
+- 智能场景的请求格式全部来自 App 代码。作者账号里只有一个没有设备的睡眠场景，执行、开关、冲突处理和执行结果的查询都还没在真机上验证过。网关内机的 `ctrlList` 按场景里内机自己的 `iezCode` / `deviceType` 分组（App 从家庭详情取网关列表，已经移出家庭的网关的内机 App 不发送，HA 仍会发送）。
 
 ## 开发 / 测试
 

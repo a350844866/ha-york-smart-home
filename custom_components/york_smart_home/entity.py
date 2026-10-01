@@ -6,15 +6,20 @@ from collections.abc import Callable, Iterable
 from typing import Any
 
 from homeassistant.core import callback
-from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
+from homeassistant.helpers.device_registry import (
+    CONNECTION_NETWORK_MAC,
+    DeviceEntryType,
+    DeviceInfo,
+)
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .api import as_number
 from .const import DOMAIN, KEY_INDOOR_HUMIDITY
-from .coordinator import YorkConfigEntry, YorkCoordinator, YorkDevice
+from .coordinator import YorkConfigEntry, YorkCoordinator, YorkDevice, YorkScene
 from .profile import Profile
+from .scenes import SceneType, scene_device_count
 from .status import air_reading
 
 
@@ -48,6 +53,101 @@ def async_add_device_entities(
 
     add_new()
     entry.async_on_unload(coordinator.async_add_listener(add_new))
+
+
+@callback
+def async_add_scene_entities(
+    entry: YorkConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+    factory: Callable[[YorkCoordinator, YorkScene], Iterable[Entity]],
+) -> None:
+    """Add entities for the cloud scenes, also for ones created in the app later.
+
+    A scene deleted in the app keeps its entity, which becomes unavailable
+    (and available again if the scene comes back).
+    """
+    coordinator = entry.runtime_data
+    known: set[tuple[int, str]] = set()
+
+    @callback
+    def add_new() -> None:
+        new = [
+            scene
+            for home in coordinator.homes.values()
+            for scene in home.scenes.values()
+            if (scene.home_id, scene.smart_id) not in known
+        ]
+        if new:
+            known.update((scene.home_id, scene.smart_id) for scene in new)
+            async_add_entities(e for scene in new for e in factory(coordinator, scene))
+
+    add_new()
+    entry.async_on_unload(coordinator.async_add_listener(add_new))
+
+
+class YorkSceneEntity(CoordinatorEntity[YorkCoordinator]):
+    """One cloud scene (智能场景), on a device for its home.
+
+    The name is the scene's name in the app (renaming it there renames the
+    entity, not its entity id).
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "scene"
+
+    def __init__(self, coordinator: YorkCoordinator, scene: YorkScene) -> None:
+        super().__init__(coordinator)
+        self._home_id = scene.home_id
+        self._smart_id = scene.smart_id
+        self._attr_unique_id = f"home_{scene.home_id}_scene_{scene.smart_id}"
+        self._attr_name = scene.name
+        home = coordinator.homes[scene.home_id]
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"home_{scene.home_id}")},
+            translation_key="home",
+            translation_placeholders={"home": home.name or str(scene.home_id)},
+            manufacturer="York 约克",
+            model="约克智慧家",
+            entry_type=DeviceEntryType.SERVICE,
+        )
+
+    @property
+    def scene(self) -> YorkScene | None:
+        home = self.coordinator.homes.get(self._home_id)
+        return home.scenes.get(self._smart_id) if home is not None else None
+
+    @property
+    def stype(self) -> SceneType:
+        scene = self.scene
+        assert scene is not None and scene.stype is not None
+        return scene.stype
+
+    @property
+    def available(self) -> bool:
+        home = self.coordinator.homes.get(self._home_id)
+        scene = self.scene
+        return (
+            super().available
+            and home is not None
+            and home.present
+            and scene is not None
+            and scene.present
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        if (scene := self.scene) is None or scene.stype is None:
+            return None
+        return {
+            "scene_type": scene.stype.key,
+            "devices": scene_device_count(scene.record),
+        }
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        if (scene := self.scene) is not None and scene.present:
+            self._attr_name = scene.name  # renamed in the app
+        super()._handle_coordinator_update()
 
 
 class YorkEntity(CoordinatorEntity[YorkCoordinator]):

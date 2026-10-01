@@ -71,6 +71,11 @@
       }
     }
   },
+  "device": {
+    "home": {
+      "name": "{home} York Smart Home"
+    }
+  },
   "entity": {
     "climate": {
       "york": {
@@ -219,6 +224,39 @@
     "button": {
       "filter_reset": {
         "name": "Reset filter"
+      },
+      "scene": {
+        "name": "Scene",
+        "state_attributes": {
+          "scene_type": {
+            "name": "Scene type",
+            "state": {
+              "leave_home": "Leave home",
+              "go_home": "Return home",
+              "sleep_curve": "Sleep curve",
+              "leave_home_energy_saving": "Leave-home energy saving",
+              "night_mute": "Night mute",
+              "manual": "Manual scene",
+              "timer_legacy": "Timer (old version)",
+              "summer": "Summer heat protection",
+              "winter": "Winter overcooling protection",
+              "dehumidify": "Smart dehumidification",
+              "purify": "Smart purification",
+              "ai_fast_heat": "AI water/refrigerant fast heating",
+              "advance_heating": "Pre-heating",
+              "pets": "Pets",
+              "party": "Party",
+              "motion": "Exercise",
+              "vacation": "Vacation",
+              "smart_dehumidify": "Two-supply smart dehumidification",
+              "hot_water_timer": "Hot water timer",
+              "timer": "Timer"
+            }
+          },
+          "devices": {
+            "name": "Devices"
+          }
+        }
       }
     },
     "switch": {
@@ -272,6 +310,47 @@
       },
       "independent_human_sense": {
         "name": "Human sensing"
+      },
+      "scene": {
+        "name": "Scene",
+        "state_attributes": {
+          "scene_type": {
+            "name": "Scene type",
+            "state": {
+              "leave_home": "Leave home",
+              "go_home": "Return home",
+              "sleep_curve": "Sleep curve",
+              "leave_home_energy_saving": "Leave-home energy saving",
+              "night_mute": "Night mute",
+              "manual": "Manual scene",
+              "timer_legacy": "Timer (old version)",
+              "summer": "Summer heat protection",
+              "winter": "Winter overcooling protection",
+              "dehumidify": "Smart dehumidification",
+              "purify": "Smart purification",
+              "ai_fast_heat": "AI water/refrigerant fast heating",
+              "advance_heating": "Pre-heating",
+              "pets": "Pets",
+              "party": "Party",
+              "motion": "Exercise",
+              "vacation": "Vacation",
+              "smart_dehumidify": "Two-supply smart dehumidification",
+              "hot_water_timer": "Hot water timer",
+              "timer": "Timer"
+            }
+          },
+          "devices": {
+            "name": "Devices"
+          },
+          "status": {
+            "name": "Status",
+            "state": {
+              "on": "On",
+              "off": "Off",
+              "hangup": "Suspended"
+            }
+          }
+        }
       }
     },
     "number": {
@@ -466,6 +545,18 @@
     },
     "swing_not_available": {
       "message": "The air deflectors can only be adjusted while the unit is on and not in floor heating."
+    },
+    "scene_gone": {
+      "message": "This scene no longer exists in the 约克智慧家 app."
+    },
+    "scene_no_devices": {
+      "message": "The scene {scene} has no air conditioner yet; edit it in the 约克智慧家 app and add one first."
+    },
+    "scene_conflict": {
+      "message": "The scene {scene} conflicts with another scene and was not changed ({message}). Home Assistant never switches other scenes off for it; resolve it in the 约克智慧家 app."
+    },
+    "scene_rejected": {
+      "message": "The York cloud rejected the scene {scene}: {message}"
     }
   },
   "issues": {

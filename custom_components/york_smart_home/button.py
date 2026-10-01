@@ -1,4 +1,9 @@
-"""Filter reset button for York wire controllers."""
+"""Buttons for York Smart Home.
+
+* Filter reset of a wire controller.
+* Run buttons of the app's cloud scenes (智能场景) that have one: manual,
+  leave home, return home, AI fast heat, greenhouse and party scenes.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,13 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .control import filter_reset_command, filter_reset_state, has_filter_tips
 from .coordinator import YorkConfigEntry
-from .entity import YorkEntity, async_add_device_entities
+from .entity import (
+    YorkEntity,
+    YorkSceneEntity,
+    async_add_device_entities,
+    async_add_scene_entities,
+)
+from .scenes import RUN
 
 PARALLEL_UPDATES = 0  # the coordinator serializes commands per controller
 
@@ -28,6 +39,15 @@ async def async_setup_entry(
             else []
         ),
         wait_for_status=True,
+    )
+    async_add_scene_entities(
+        entry,
+        async_add_entities,
+        lambda coordinator, scene: (
+            [YorkSceneButton(coordinator, scene)]
+            if scene.stype is not None and scene.stype.control == RUN
+            else []
+        ),
     )
 
 
@@ -59,3 +79,15 @@ class YorkFilterReset(YorkEntity, ButtonEntity):
             optimistic=lambda view, cmd: filter_reset_state(view, self.device.profile),
             recheck=True,
         )
+
+
+class YorkSceneButton(YorkSceneEntity, ButtonEntity):
+    """Run a cloud scene once, like its run (play) button in the app.
+
+    Manual, leave home, return home and AI fast heat scenes send their
+    stored commands to their devices; greenhouse and party scenes ask the
+    cloud to run them.
+    """
+
+    async def async_press(self) -> None:
+        await self.coordinator.async_run_scene(self._home_id, self._smart_id)

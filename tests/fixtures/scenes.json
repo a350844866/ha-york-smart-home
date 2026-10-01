@@ -1,0 +1,37 @@
+{
+  "_note": "The account's only cloud scene (smartList of GET /api/apptimer/homes/{homeId}/smarts) with fake ids and times: a sleep curve scene (type 5) that is off and has no devices yet.",
+  "smartList": [
+    {
+      "smartId": 300003,
+      "favoriteFlg": "0",
+      "actionValueFrom": null,
+      "openFlg": "0",
+      "syncFlg": "0",
+      "timeRule": null,
+      "timeRuleOn": null,
+      "timeRuleOff": null,
+      "effectFrom": null,
+      "kszrStartTime": null,
+      "updateUser": 200002,
+      "updateTime": 1700000000002,
+      "boxCodes": null,
+      "type": "5",
+      "effectTo": null,
+      "actionAttrs": null,
+      "sceneInfo": {},
+      "createTime": 1700000000001,
+      "ctrlJsonArray": [],
+      "ctrlJsonArrayCswd": [],
+      "actionValueTo": null,
+      "actionFlg": null,
+      "createUser": 200002,
+      "homeId": 100001,
+      "brand": "3",
+      "smartName": "睡眠",
+      "boxCode": null,
+      "actionAttr": null,
+      "iuList": [],
+      "xkqList": []
+    }
+  ]
+}

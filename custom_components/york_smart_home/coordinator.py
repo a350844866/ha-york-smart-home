@@ -35,6 +35,7 @@ from .api import (
     YorkCommandError,
     YorkError,
     YorkRateLimitError,
+    YorkSceneConflictError,
     YorkSessionConflictError,
     YorkSessionTakenError,
     as_number,
@@ -67,6 +68,10 @@ from .const import (
     REFRESH_DELAY_AFTER_CONTROL,
     RELOGIN_BACKOFF_MAX,
     RELOGIN_BACKOFF_MIN,
+    SCENE_INTERVAL,
+    SCENE_RESULT_INTERVAL,
+    SCENE_RESULT_POLLS,
+    SCENE_RESULT_TIMEOUT,
     SETTINGS_KEYS,
     TIMER_CHECK_DELAY,
     TIMER_HOURS,
@@ -84,6 +89,22 @@ from .control import (
     timer_set_state,
 )
 from .profile import Profile, profile_for
+from .scenes import (
+    CLOSE,
+    OPEN,
+    OPEN_FLAG,
+    RECOMMENDED,
+    REPLAY,
+    SceneType,
+    flag_key,
+    has_devices,
+    module_succeeded,
+    replay_request,
+    result_outcome,
+    scene_name,
+    scene_target_reached,
+    scene_type,
+)
 from .status import cooling_down
 
 _LOGGER = logging.getLogger(__name__)
@@ -200,6 +221,49 @@ class YorkDevice:
         return cooling_down(self.status)
 
 
+@dataclass
+class YorkScene:
+    """A cloud scene (智能场景) of a home: the record of the app's scene list."""
+
+    home_id: int
+    record: dict[str, Any]
+    # False once the scene is no longer in the home's list (deleted in the app).
+    present: bool = True
+
+    @property
+    def smart_id(self) -> str:
+        return str(self.record.get("smartId"))
+
+    @property
+    def stype(self) -> SceneType | None:
+        """How the app offers the scene's type (None: the app does not list it)."""
+        return scene_type(self.record)
+
+    @property
+    def name(self) -> str:
+        return scene_name(self.record)
+
+    @property
+    def request_home_id(self) -> Any:
+        """homeId for the scene's requests: the record's own, as the app sends it."""
+        home_id = self.record.get("homeId")
+        return self.home_id if home_id is None else home_id
+
+
+@dataclass
+class YorkHome:
+    """A home (家庭) of the account with a supported wire controller, and its scenes."""
+
+    home_id: int
+    name: str | None = None
+    scenes: dict[str, YorkScene] = field(default_factory=dict)
+    # The scene list has been read at least once.
+    loaded: bool = False
+    # False once no supported wire controller is left in the home: its
+    # scenes are no longer read (and their entities become unavailable).
+    present: bool = True
+
+
 class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
     """Polls every wire controller on the account."""
 
@@ -233,6 +297,13 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
         self._relogin_backoff = 0
         # Set while the cloud demands a newer app version (code 300).
         self._outdated_until: float | None = None
+        # Cloud scenes per homeId, read on their own slow timer.
+        self.homes: dict[int, YorkHome] = {}
+        # Monotonic time of the last scene list read (None: read at the next poll).
+        self._last_scene_fetch: float | None = None
+        # Error of the last failed scene list read, logged once as a warning.
+        self._scene_read_error: str | None = None
+        self._scene_locks: dict[int, asyncio.Lock] = {}
         entry.async_on_unload(self._cancel_control_refresh)
 
     @property
@@ -242,6 +313,11 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
     @property
     def client_outdated(self) -> bool:
         return self._outdated_until is not None
+
+    @property
+    def scene_error(self) -> str | None:
+        """Why the last scene list read failed (None: it worked)."""
+        return self._scene_read_error
 
     # --------------------------------------------------------------- polling
 
@@ -272,7 +348,8 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
         self._failures = 0
         return self.devices
 
-    async def _poll(self) -> None:
+    async def _poll(self, *, scenes: bool = True) -> None:
+        """One polling round; ``scenes`` also reads the scene lists when due."""
         now = time.monotonic()
         # Paused states fail fast, without contacting the cloud.
         if self._paused_until is not None and now < self._paused_until:
@@ -337,6 +414,10 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
                     # A controller missing from the answer is not known to be online.
                     dev.online = online.get(dev.code, False)
                 self._last_online = now
+
+            if scenes and self._scenes_due(now):
+                await self._fetch_scenes()
+                self._last_scene_fetch = now
         except YorkSessionTakenError as err:
             self._start_yield(now)
             raise UpdateFailed(str(err)) from None
@@ -393,6 +474,69 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
             constants = {}
         return constants or parse_constants(dev.info.get("constantJson"))
 
+    # ---------------------------------------------------------------- scenes
+
+    def _scene_homes(self) -> dict[int, Any]:
+        """Homes with a supported wire controller: homeId -> homeName.
+
+        The scenes tab reads the list of any home with a device; homes
+        without a controller this integration supports are left out.
+        """
+        return {d.home_id: d.info.get("homeName") for d in self.devices.values() if d.present}
+
+    def _scenes_due(self, now: float) -> bool:
+        """Read the scene lists on their slow timer, or now for a new or removed home."""
+        if self._last_scene_fetch is None or now - self._last_scene_fetch >= SCENE_INTERVAL:
+            return True
+        known = {home_id for home_id, home in self.homes.items() if home.present}
+        return known != set(self._scene_homes())
+
+    async def _fetch_scenes(self) -> None:
+        """Read the scene list of every home.
+
+        Errors of the session as a whole (login, app update, rate limit)
+        propagate like those of the status poll. Any other error keeps the
+        last list, so the climate poll goes on; the read is retried at the
+        next slow tick.
+        """
+        homes = self._scene_homes()
+        for home_id, home in self.homes.items():
+            home.present = home_id in homes
+        failed = False
+        for home_id, name in homes.items():
+            home = self.homes.setdefault(home_id, YorkHome(home_id))
+            home.present = True
+            if name:
+                home.name = str(name)
+            try:
+                records = await self.api.get_scenes(home_id)
+            except (YorkAuthError, YorkClientOutdatedError, YorkRateLimitError):
+                raise
+            except YorkError as err:
+                failed = True
+                if self._scene_read_error is None:
+                    _LOGGER.warning(
+                        "Could not read the York scenes (%s); keeping the last ones and "
+                        "trying again in %s minutes",
+                        err,
+                        SCENE_INTERVAL // 60,
+                    )
+                else:
+                    _LOGGER.debug("York scenes still unreadable: %s", err)
+                self._scene_read_error = str(err)
+                continue
+            _merge_scenes(home, records)
+        if not failed and self._scene_read_error is not None:
+            _LOGGER.info("York scenes can be read again")
+            self._scene_read_error = None
+
+    def _scene(self, home_id: int, smart_id: str) -> YorkScene:
+        home = self.homes.get(home_id)
+        scene = home.scenes.get(smart_id) if home is not None else None
+        if home is None or scene is None or not home.present or not scene.present:
+            raise HomeAssistantError(translation_domain=DOMAIN, translation_key="scene_gone")
+        return scene
+
     # ------------------------------------------------------- session / issues
 
     def _yield_minutes(self) -> int:
@@ -432,6 +576,7 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
         self._relogin_backoff = 0
         # The other device may have changed anything meanwhile.
         self._full_status = True
+        self._last_scene_fetch = None
         ir.async_delete_issue(self.hass, DOMAIN, issue_id(self.config_entry, ISSUE_SESSION_TAKEN))
 
     @callback
@@ -656,10 +801,11 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
         async with self._locks.setdefault(code, asyncio.Lock()):
             if self._yielded_until is not None:
                 # An explicit command takes the session back right away. The
-                # state may have changed meanwhile: re-read it before diffing.
+                # state may have changed meanwhile: re-read it before diffing
+                # (the scene lists wait for the next regular poll).
                 await self.async_reclaim_session()
                 try:
-                    await self._poll()
+                    await self._poll(scenes=False)
                 except (UpdateFailed, ConfigEntryAuthFailed) as err:
                     # Not a tolerated failure here: never diff a command
                     # against state that could not be re-read.
@@ -757,6 +903,216 @@ class YorkCoordinator(DataUpdateCoordinator[dict[str, YorkDevice]]):
             translation_placeholders={"error": str(err)},
         )
 
+    # ---------------------------------------------------------- scene actions
+
+    async def async_run_scene(self, home_id: int, smart_id: str) -> None:
+        """Run a scene like the app's run button.
+
+        Returns once the cloud accepted the request (code "200"); for a
+        replayed scene the cloud's result is followed in the background like
+        the scenes tab does (multiCtrlResult), and a failure is logged.
+        """
+        async with self._prepare_scene(home_id, smart_id, needs_devices=True) as scene:
+            stype = scene.stype
+            assert stype is not None
+            record = scene.record
+            try:
+                if stype.request == REPLAY:
+                    request = replay_request(record, stype)
+                    tokens = await self.api.run_scene(
+                        scene.request_home_id,
+                        request["ctrl_type"],
+                        request["xkq_ctrl_list"],
+                        request["ctrl_list"],
+                        scene_id=request["scene_id"],
+                    )
+                else:
+                    data = await self.api.run_recommended_scene(
+                        scene.request_home_id,
+                        record.get("type"),
+                        record.get("smartId"),
+                        record.get("updateTime"),
+                    )
+            except YorkError as err:
+                raise self._scene_error(err, scene) from None
+            finally:
+                self._after_scene_action()
+            if stype.request == REPLAY:
+                _LOGGER.debug("York scene %s accepted by the cloud", scene.smart_id)
+                self._release_held(record)
+                if tokens:
+                    self.config_entry.async_create_background_task(
+                        self.hass,
+                        self._scene_result(scene.name, tokens),
+                        f"{DOMAIN} scene result",
+                    )
+            else:
+                _store_update_time(scene, data)
+
+    async def async_set_scene(self, home_id: int, smart_id: str, on: bool) -> None:
+        """Switch a scene on or off like the app's toggle.
+
+        Sends the explicit target ("1"/"0") with the scene's latest
+        updateTime and nothing if the scene is already so. Like the app,
+        a scene without devices cannot be switched on (switching it off is
+        allowed, as on the home page). A conflict with another scene is an
+        error: HA never forces it (forceOpenFlg / flag "1").
+        """
+        scene = self._scene(home_id, smart_id)
+        stype = scene.stype
+        assert stype is not None
+        if scene_target_reached(scene.record, stype, on):
+            return
+        async with self._prepare_scene(home_id, smart_id, needs_devices=on) as scene:
+            record = scene.record
+            if scene_target_reached(record, stype, on):
+                return  # (as re-read after taking the session back)
+            flag = OPEN if on else CLOSE
+            try:
+                if stype.request == OPEN_FLAG:
+                    data = await self.api.set_scene_open(
+                        scene.request_home_id, record.get("smartId"), flag, record.get("updateTime")
+                    )
+                elif stype.request == RECOMMENDED:
+                    data = await self.api.run_recommended_scene(
+                        scene.request_home_id,
+                        record.get("type"),
+                        record.get("smartId"),
+                        record.get("updateTime"),
+                        open_flg=flag,
+                    )
+                else:
+                    data = await self.api.set_auto_scene(
+                        scene.request_home_id,
+                        record.get("smartId"),
+                        record.get("type"),
+                        flag,
+                        record.get("updateTime"),
+                    )
+            except YorkError as err:
+                raise self._scene_error(err, scene) from None
+            finally:
+                self._after_scene_action()
+            # Accepted: show the new state as the app does until the list is
+            # read again; the answer's updateTime is the next change's token.
+            scene.record = {**record, flag_key(stype): flag}
+            _store_update_time(scene, data)
+            self.async_update_listeners()
+
+    @asynccontextmanager
+    async def _prepare_scene(
+        self, home_id: int, smart_id: str, *, needs_devices: bool
+    ) -> AsyncIterator[YorkScene]:
+        """Checks, per-home lock and session handling around one scene action.
+
+        A scene without devices is refused before anything is sent, like the
+        app does. An action is explicit intent: a session left to another
+        device is taken back first, and the home's scene list read again (the
+        scene may have changed meanwhile, and its updateTime with it).
+        """
+        scene = self._scene(home_id, smart_id)
+        if needs_devices:
+            _check_scene_devices(scene)
+        async with self._scene_locks.setdefault(home_id, asyncio.Lock()):
+            if self._yielded_until is not None:
+                await self.async_reclaim_session()
+                try:
+                    records = await self.api.get_scenes(home_id)
+                except YorkError as err:
+                    raise self._command_error(err) from None
+                _merge_scenes(self.homes[home_id], records)
+                self.async_update_listeners()
+                scene = self._scene(home_id, smart_id)
+                if needs_devices:
+                    _check_scene_devices(scene)
+            yield scene
+
+    @callback
+    def _after_scene_action(self) -> None:
+        """After any scene request: read the scene lists again and poll soon."""
+        self._last_scene_fetch = None
+        self._schedule_control_refresh()
+
+    @callback
+    def _release_held(self, record: dict[str, Any]) -> None:
+        """A run's commands replace values held from earlier commands.
+
+        Values just set from HA are held against stale reports for
+        COMMAND_GRACE; once a scene ran, the controllers' own reports win.
+        """
+        xkq_list = record.get("xkqList")
+        for entry in xkq_list if isinstance(xkq_list, list) else []:
+            if isinstance(entry, dict) and (dev := self.devices.get(str(entry.get("xkqCode")))):
+                dev.expected.clear()
+
+    async def _scene_result(self, name: str, tokens: list[Any]) -> None:
+        """Follow a scene run like the scenes tab's getControlResults.
+
+        multiCtrlResult every SCENE_RESULT_INTERVAL: "200" ends it as done,
+        one of the failure codes as failed (with the cloud's message), any
+        other code keeps polling. After SCENE_RESULT_TIMEOUT the run counts
+        as done if any module reported "2". The app shows a toast; HA logs a
+        failure as a warning. Nothing is sent while the session is left to
+        another device, and a request error just ends the check.
+        """
+        data: Any = None
+        for _ in range(SCENE_RESULT_POLLS):
+            await asyncio.sleep(SCENE_RESULT_INTERVAL)
+            if self._cloud_on_hold():
+                _LOGGER.debug("York scene %s: result not checked, polling is on hold", name)
+                return
+            try:
+                answer = await self.api.get_control_results(tokens)
+            except YorkError as err:
+                _LOGGER.debug("York scene %s: result not readable (%s)", name, err)
+                return
+            if isinstance(answer.get("data"), list):
+                data = answer["data"]
+            outcome = result_outcome(answer["code"])
+            if outcome is True:
+                _LOGGER.debug("York scene %s carried out", name)
+                return
+            if outcome is False:
+                _LOGGER.warning(
+                    "York scene %s failed: %s",
+                    name,
+                    answer.get("message") or f"code {answer['code']}",
+                )
+                return
+        if module_succeeded(data):
+            _LOGGER.debug("York scene %s carried out by at least one device", name)
+        else:
+            _LOGGER.warning(
+                "York scene %s: no device confirmed it within %s seconds",
+                name,
+                SCENE_RESULT_TIMEOUT,
+            )
+
+    def _cloud_on_hold(self) -> bool:
+        """The session is left to another device, or the cloud asked to pause."""
+        now = time.monotonic()
+        return (
+            self._yielded_until is not None
+            or self._outdated_until is not None
+            or (self._paused_until is not None and now < self._paused_until)
+        )
+
+    def _scene_error(self, err: YorkError, scene: YorkScene) -> HomeAssistantError:
+        """The user-facing error for a failed scene request."""
+        if isinstance(err, YorkSceneConflictError):
+            return HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="scene_conflict",
+                translation_placeholders={"scene": scene.name, "message": str(err)},
+            )
+        if isinstance(err, YorkCommandError):
+            return HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="scene_rejected",
+                translation_placeholders={"scene": scene.name, "message": str(err)},
+            )
+        return self._command_error(err)
+
     @callback
     def _schedule_control_refresh(self) -> None:
         # Not "_schedule_refresh": that name belongs to DataUpdateCoordinator,
@@ -787,6 +1143,44 @@ def _check_controllable(dev: YorkDevice) -> None:
         # "系统冷却中" state, which only leaves the page; the home page covers
         # the card with the same overlay.
         raise HomeAssistantError(translation_domain=DOMAIN, translation_key="cooling_down")
+
+
+def _check_scene_devices(scene: YorkScene) -> None:
+    """Refuse running or switching on a scene without devices, as the app does."""
+    if not has_devices(scene.record):
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="scene_no_devices",
+            translation_placeholders={"scene": scene.name},
+        )
+
+
+def _merge_scenes(home: YorkHome, records: list[dict[str, Any]]) -> None:
+    """Take a home's scene list; scenes missing from it are marked gone."""
+    seen = set()
+    for record in records:
+        smart_id = str(record["smartId"])
+        seen.add(smart_id)
+        if (scene := home.scenes.get(smart_id)) is None:
+            _LOGGER.debug("York scene %s (type %s) found", smart_id, record.get("type"))
+            home.scenes[smart_id] = YorkScene(home.home_id, record)
+        else:
+            scene.record = record
+            scene.present = True
+    for smart_id, scene in home.scenes.items():
+        scene.present = smart_id in seen
+    home.loaded = True
+
+
+def _store_update_time(scene: YorkScene, data: dict[str, Any]) -> None:
+    """Keep the updateTime of an accepted change: the token of the next one.
+
+    The correctly spelt field only (the scenes tab reads a misspelt
+    "upadteTime" after running a greenhouse or party scene). Without it the
+    scene list, which is read again after every action, brings the token.
+    """
+    if (token := data.get("updateTime")) is not None:
+        scene.record = {**scene.record, "updateTime": token}
 
 
 def _has_value(value: Any) -> bool:

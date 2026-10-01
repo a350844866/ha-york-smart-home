@@ -109,6 +109,15 @@ class YorkCommandError(YorkError):
     """The cloud or the wire controller rejected a command."""
 
 
+class YorkSceneConflictError(YorkCommandError):
+    """The scene conflicts with another one; the message names the conflict.
+
+    Code "223" of a recommended scene, or a linkage scene answer without
+    updateTime that lists the conflicting scenes (hcScenes). The app then
+    asks whether to force it, which switches the other scenes off.
+    """
+
+
 def is_on(value: Any) -> bool:
     """The API mixes "1", 1 and True for flags."""
     return value is True or value == 1 or value == "1"
@@ -624,5 +633,189 @@ class YorkApi:
         _LOGGER.debug("Simple timer %s answered: %s", xkq_code, answer)
         if answer["code"] != "200":
             raise YorkCommandError(str(answer.get("message") or f"code {answer['code']}"))
+        data = answer.get("data")
+        return dict(data) if isinstance(data, dict) else {}
+
+    # ---------------------------------------------------------------- scenes
+
+    async def get_scenes(self, home_id: int) -> list[dict[str, Any]]:
+        """Cloud scenes (智能场景) of a home, as the app's scenes tab lists them.
+
+        GET /api/apptimer/homes/{homeId}/smarts (SCENE_GET_ALL_SCENE): the
+        tab keeps ``data.smartList`` when the code is "200". A missing list
+        means no scenes; records without a smartId cannot be addressed and
+        are skipped.
+        """
+        data = await self._request("GET", f"/api/apptimer/homes/{home_id}/smarts")
+        if not isinstance(data, dict):
+            raise YorkApiError("smarts: invalid response")
+        scenes = data.get("smartList")
+        if scenes is None:
+            return []
+        if not isinstance(scenes, list):
+            raise YorkApiError("smarts: invalid response")
+        return [s for s in scenes if isinstance(s, dict) and s.get("smartId") is not None]
+
+    async def run_scene(
+        self,
+        home_id: Any,
+        ctrl_type: str,
+        xkq_ctrl_list: list[dict[str, Any]],
+        ctrl_list: list[dict[str, Any]],
+        *,
+        scene_id: Any = None,
+    ) -> list[Any]:
+        """Run a scene the way the app does: replay its stored commands.
+
+        The app has no "execute scene" call (SCENE_EXECUTE, /cmds/sceneControl,
+        is never used): the scenes tab (runManualScenes) and the home page
+        (preControlSceneParams) post the scene's commands to multiIuOuCtrl
+        in a ZL0E body, whose constructor adds regionCode "000000",
+        positionLng/positionLat 0 and empty position1/position2/positionCity
+        (the control page's body has none of these); ``scene_id`` only for
+        AI fast heat (YO43F). Code "200" is success, like a command; the app
+        shows the message of any other code.
+
+        A user action, so a session taken by another device is logged in
+        again right away. Returns the answer's data unchanged: the tokens the
+        scenes tab passes to multiCtrlResult.
+        """
+        body: dict[str, Any] = {
+            "regionCode": "000000",
+            "positionLng": 0,
+            "positionLat": 0,
+            "position1": "",
+            "position2": "",
+            "positionCity": "",
+            "ctrlList": ctrl_list,
+            "xkqCtrlList": xkq_ctrl_list,
+            "homeId": home_id,
+            "ctrlType": ctrl_type,
+        }
+        if scene_id is not None:
+            body["sceneId"] = scene_id
+        _LOGGER.debug("Run scene: %s", body)
+        answer = await self._authed(
+            "POST", "/api/appcontrol/cmds/multiIuOuCtrl", json=body, envelope=True, reclaim=True
+        )
+        _LOGGER.debug("Run scene answered: %s", answer)
+        if answer["code"] != "200":
+            raise YorkCommandError(str(answer.get("message") or f"code {answer['code']}"))
+        data = answer.get("data")
+        return data if isinstance(data, list) else []
+
+    async def get_control_results(self, token_list: list[Any]) -> dict[str, Any]:
+        """One multiCtrlResult poll (FETCH_CONTROL_RESULT) after a scene run.
+
+        Body ``{"tokenList": <the run's data>}``; returns the envelope, whose
+        code tells how the run went (scenes.result_outcome). A background
+        check, not a user action: it never takes the session back.
+        """
+        return await self._authed(
+            "POST",
+            "/api/appcontrol/cmds/multiCtrlResult",
+            json={"tokenList": token_list},
+            envelope=True,
+        )
+
+    async def set_scene_open(
+        self, home_id: int, smart_id: Any, open_flg: str, update_time: Any
+    ) -> dict[str, Any]:
+        """Switch a scene on ("1") or off ("0"): PUT .../smarts/{smartId}/openFlg.
+
+        SCENE_OPEN_CLOSE_SMART_SCENE with the scenes tab's body (openCloseScenes)
+        ``{"openFlg", "updateTime"}``; the home page adds homeId and smartId.
+        updateTime is the scene's latest one, an optimistic lock. Returns the
+        answer's data (``data.updateTime`` is the next token).
+        """
+        return await self._scene_request(
+            "PUT",
+            f"/api/apptimer/homes/{home_id}/smarts/{smart_id}/openFlg",
+            {"openFlg": open_flg, "updateTime": update_time},
+        )
+
+    async def run_recommended_scene(
+        self,
+        home_id: Any,
+        scene_type: str,
+        smart_id: Any,
+        update_time: Any,
+        *,
+        open_flg: str | None = None,
+    ) -> dict[str, Any]:
+        """POST .../scene/type/{type}/{sceneId} (recommendedSceneExecution).
+
+        With ``open_flg``: switch a vacation, two-supply dehumidification or
+        motion scene on or off, body ``{homeId, sceneId, openFlg, type,
+        updateTime, forceOpenFlg: "0"}`` (openCloseScenes). Code "223" means
+        it conflicts with another scene; the app then asks and sends
+        forceOpenFlg "1", which switches the other one off. That is never
+        sent here. Without ``open_flg``: run a greenhouse or party scene
+        once, body ``{homeId, sceneId, type, updateTime}`` (runManualScenes).
+        Returns the answer's data; the scenes tab reads the run's new token
+        from a misspelt ``upadteTime``, the home page from ``updateTime``.
+        """
+        body: dict[str, Any] = {"homeId": home_id, "sceneId": smart_id}
+        if open_flg is not None:
+            body["openFlg"] = open_flg
+        body["type"] = scene_type
+        body["updateTime"] = update_time
+        if open_flg is not None:
+            body["forceOpenFlg"] = "0"
+        return await self._scene_request(
+            "POST", f"/api/apptimer/homes/{home_id}/scene/type/{scene_type}/{smart_id}", body
+        )
+
+    async def set_auto_scene(
+        self, home_id: Any, smart_id: Any, scene_type: str, action_flg: str, update_time: Any
+    ) -> dict[str, Any]:
+        """Start ("1") or stop ("0") a linkage or pets scene (SCENE_RUN_AUTO).
+
+        PUT .../newScenes/{smartId}/flag/0 with the app's body (runAutoScenes)
+        ``{hcScenes: [], updateTime, type, actionFlg, flag: "0", homeId,
+        smartId}``. Code "200" without ``data.updateTime`` means the scene
+        conflicts with the ones in ``data.hcScenes``: the app then asks
+        ("将关闭场景…,继续打开此场景?") and sends flag "1", which switches
+        them off. That is never sent here.
+        """
+        data = await self._scene_request(
+            "PUT",
+            f"/api/apptimer/homes/{home_id}/newScenes/{smart_id}/flag/0",
+            {
+                "hcScenes": [],
+                "updateTime": update_time,
+                "type": scene_type,
+                "actionFlg": action_flg,
+                "flag": "0",
+                "homeId": home_id,
+                "smartId": smart_id,
+            },
+        )
+        if data.get("updateTime") is None:
+            conflicts = data.get("hcScenes")
+            if not isinstance(conflicts, list):
+                conflicts = []
+            names = [
+                f"场景{scene['smartName']}"
+                for scene in conflicts
+                if isinstance(scene, dict) and scene.get("smartName")
+            ]
+            raise YorkSceneConflictError("、".join(names) or "conflict")
+        return data
+
+    async def _scene_request(self, method: str, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        """A scene change; an explicit user action like control().
+
+        "200" is success; "223" a conflict with another scene; any other code
+        a rejection with the server's message (the app shows it).
+        """
+        _LOGGER.debug("Scene %s %s: %s", method, path, body)
+        answer = await self._authed(method, path, json=body, envelope=True, reclaim=True)
+        _LOGGER.debug("Scene %s %s answered: %s", method, path, answer)
+        message = str(answer.get("message") or f"code {answer['code']}")
+        if answer["code"] == "223":
+            raise YorkSceneConflictError(message)
+        if answer["code"] != "200":
+            raise YorkCommandError(message)
         data = answer.get("data")
         return dict(data) if isinstance(data, dict) else {}

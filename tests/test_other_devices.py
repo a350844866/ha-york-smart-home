@@ -86,7 +86,10 @@ def _entities(hass, platform: str) -> set[str]:
     return {
         entry.unique_id.removeprefix(f"{CODE}_")
         for entry in er.async_get(hass).entities.values()
-        if entry.platform == DOMAIN and entry.domain == platform
+        if entry.platform == DOMAIN
+        and entry.domain == platform
+        # (not the home's cloud scenes)
+        and (entry.unique_id == CODE or entry.unique_id.startswith(f"{CODE}_"))
     }
 
 
